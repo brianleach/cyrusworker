@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cyrusworker",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-30",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 5
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "Sandbox",
+        "name": "Sandbox"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "new_sqlite_classes": ["Sandbox"],
+      "tag": "v1"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "CYRUS_STORAGE",
+      "bucket_name": "cyrusworker-data"
+    }
+  ],
+
+  "vars": {
+    "SANDBOX_SLEEP_AFTER": "never"
+  }
+}
