@@ -1,0 +1,14 @@
+{
+  "repositories": [],
+  "promptDefaults": {
+    "debugger": {
+      "allowedTools": "readOnly"
+    },
+    "builder": {
+      "allowedTools": "safe"
+    },
+    "scoper": {
+      "allowedTools": ["Read(**)", "WebFetch", "Task"]
+    }
+  }
+}
