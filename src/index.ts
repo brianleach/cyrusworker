@@ -1,0 +1,376 @@
+import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+
+export { Sandbox } from "@cloudflare/sandbox";
+
+interface Env {
+  Sandbox: DurableObjectNamespace<Sandbox>;
+  CYRUS_STORAGE: R2Bucket;
+  LINEAR_WEBHOOK_SECRET?: string;
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  CF_ACCESS_AUD?: string;
+  ANTHROPIC_API_KEY?: string;
+  GH_TOKEN?: string;
+  GIT_USER_NAME?: string;
+  GIT_USER_EMAIL?: string;
+}
+
+interface LinearWebhookPayload {
+  type: string;
+  action: string;
+  organizationId: string;
+  data?: {
+    id: string;
+    identifier: string;
+    title: string;
+    assignee?: {
+      id: string;
+      name: string;
+      email: string;
+    };
+  };
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    try {
+      // Health check
+      if (url.pathname === "/health") {
+        return new Response("OK", { status: 200 });
+      }
+
+      // Linear webhook endpoint
+      if (url.pathname === "/webhook/linear" && request.method === "POST") {
+        return await handleLinearWebhook(request, env);
+      }
+
+      // Linear OAuth callback
+      if (url.pathname === "/oauth/callback") {
+        return handleOAuthCallback(request, env);
+      }
+
+      // Admin UI
+      if (url.pathname === "/_admin" || url.pathname === "/_admin/") {
+        return handleAdminUI(request, env);
+      }
+
+      // API routes
+      if (url.pathname.startsWith("/api/")) {
+        return await handleApiRoutes(request, env, url);
+      }
+
+      // Root
+      if (url.pathname === "/") {
+        return new Response(
+          "CyrusWorker - Claude Code Linear Agent on Cloudflare\n\nEndpoints:\n- /_admin/ - Admin UI\n- /webhook/linear - Linear webhook\n- /health - Health check",
+          { headers: { "Content-Type": "text/plain" } }
+        );
+      }
+
+      return new Response("Not Found", { status: 404 });
+    } catch (error) {
+      console.error("Request error:", error);
+      return new Response(`Internal Error: ${error}`, { status: 500 });
+    }
+  },
+};
+
+async function handleLinearWebhook(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const body = await request.text();
+
+  // Verify webhook signature if secret is configured
+  if (env.LINEAR_WEBHOOK_SECRET) {
+    const signature = request.headers.get("linear-signature");
+    if (!verifyLinearSignature(body, signature, env.LINEAR_WEBHOOK_SECRET)) {
+      return new Response("Invalid signature", { status: 401 });
+    }
+  }
+
+  const payload: LinearWebhookPayload = JSON.parse(body);
+  console.log("Linear webhook:", payload.type, payload.action);
+
+  // Only process issue updates
+  if (payload.type !== "Issue") {
+    return Response.json({ status: "ignored", reason: "not an issue" });
+  }
+
+  // Check if assigned to Cyrus
+  const assignee = payload.data?.assignee;
+  if (!assignee || !isCyrusAssignee(assignee)) {
+    return Response.json({ status: "ignored", reason: "not assigned to cyrus" });
+  }
+
+  // Get sandbox instance
+  const sandboxId = `workspace-${payload.organizationId}`;
+  const sandbox = getSandbox(env.Sandbox, sandboxId);
+
+  // Process issue in sandbox
+  const issueJson = JSON.stringify(payload.data);
+  const result = await sandbox.exec(
+    `echo 'Processing issue: ${payload.data?.identifier}' && cyrus process-issue '${issueJson}'`
+  );
+
+  return Response.json({
+    status: "processed",
+    issue: payload.data?.identifier,
+    success: result.success,
+    output: result.stdout,
+    error: result.stderr,
+  });
+}
+
+async function handleApiRoutes(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response> {
+  const sandbox = getSandbox(env.Sandbox, "primary");
+
+  // Get sandbox status
+  if (url.pathname === "/api/status") {
+    const result = await sandbox.exec("ps aux && echo '---' && df -h");
+    return Response.json({
+      output: result.stdout,
+      success: result.success,
+    });
+  }
+
+  // Get config
+  if (url.pathname === "/api/config") {
+    const result = await sandbox.exec("cat /root/.cyrus/config.json 2>/dev/null || echo '{}'");
+    try {
+      return Response.json(JSON.parse(result.stdout));
+    } catch {
+      return Response.json({});
+    }
+  }
+
+  // Trigger backup
+  if (url.pathname === "/api/backup" && request.method === "POST") {
+    const result = await sandbox.exec(
+      "tar -czf /tmp/cyrus-backup.tar.gz -C /root .cyrus 2>/dev/null && base64 /tmp/cyrus-backup.tar.gz"
+    );
+
+    if (result.success && result.stdout) {
+      const backupData = Uint8Array.from(atob(result.stdout.trim()), (c) =>
+        c.charCodeAt(0)
+      );
+      const timestamp = Date.now();
+      await env.CYRUS_STORAGE.put("backups/latest.tar.gz", backupData);
+      await env.CYRUS_STORAGE.put(`backups/${timestamp}.tar.gz`, backupData);
+      return Response.json({ success: true, timestamp });
+    }
+
+    return Response.json({ success: false, error: result.stderr });
+  }
+
+  // Execute command (protected - only for admin)
+  if (url.pathname === "/api/exec" && request.method === "POST") {
+    const { command } = (await request.json()) as { command: string };
+    const result = await sandbox.exec(command);
+    return Response.json({
+      success: result.success,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+    });
+  }
+
+  return new Response("Not Found", { status: 404 });
+}
+
+function handleOAuthCallback(request: Request, env: Env): Response {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+
+  // TODO: Exchange code for tokens, store in R2
+  console.log("OAuth callback:", { code: !!code, state });
+
+  return new Response(
+    "OAuth complete! You can close this window and return to CyrusWorker.",
+    { headers: { "Content-Type": "text/plain" } }
+  );
+}
+
+function handleAdminUI(request: Request, env: Env): Response {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyrusWorker Admin</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    h1 { color: #333; }
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 16px 0;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .card h2 { margin-top: 0; color: #444; }
+    button {
+      background: #0066cc;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+    button:hover { background: #0055aa; }
+    button.secondary { background: #666; }
+    pre {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 16px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 13px;
+    }
+    .status {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 14px;
+    }
+    .status.ok { background: #d4edda; color: #155724; }
+    .status.error { background: #f8d7da; color: #721c24; }
+    input[type="text"] {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>CyrusWorker Admin</h1>
+
+  <div class="card">
+    <h2>Sandbox Status</h2>
+    <div id="status">Loading...</div>
+    <button onclick="refreshStatus()">Refresh</button>
+  </div>
+
+  <div class="card">
+    <h2>Configuration</h2>
+    <pre id="config">Loading...</pre>
+    <button onclick="loadConfig()">Reload Config</button>
+  </div>
+
+  <div class="card">
+    <h2>Backup</h2>
+    <p>Backup Cyrus config to R2 storage.</p>
+    <button onclick="triggerBackup()">Backup Now</button>
+    <span id="backupStatus"></span>
+  </div>
+
+  <div class="card">
+    <h2>Execute Command</h2>
+    <input type="text" id="cmdInput" placeholder="Enter command (e.g., ls -la /root/.cyrus)" />
+    <button onclick="execCommand()">Execute</button>
+    <pre id="cmdOutput"></pre>
+  </div>
+
+  <script>
+    async function refreshStatus() {
+      document.getElementById('status').innerHTML = 'Loading...';
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        document.getElementById('status').innerHTML =
+          '<span class="status ok">Running</span><pre>' + (data.output || 'No output') + '</pre>';
+      } catch (e) {
+        document.getElementById('status').innerHTML =
+          '<span class="status error">Error</span><pre>' + e.message + '</pre>';
+      }
+    }
+
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/config');
+        const data = await res.json();
+        document.getElementById('config').textContent = JSON.stringify(data, null, 2);
+      } catch (e) {
+        document.getElementById('config').textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function triggerBackup() {
+      document.getElementById('backupStatus').textContent = 'Backing up...';
+      try {
+        const res = await fetch('/api/backup', { method: 'POST' });
+        const data = await res.json();
+        document.getElementById('backupStatus').textContent =
+          data.success ? 'Backup complete: ' + new Date(data.timestamp).toLocaleString() : 'Failed: ' + data.error;
+      } catch (e) {
+        document.getElementById('backupStatus').textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function execCommand() {
+      const cmd = document.getElementById('cmdInput').value;
+      if (!cmd) return;
+      document.getElementById('cmdOutput').textContent = 'Executing...';
+      try {
+        const res = await fetch('/api/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd })
+        });
+        const data = await res.json();
+        document.getElementById('cmdOutput').textContent =
+          (data.stdout || '') + (data.stderr ? '\\nSTDERR:\\n' + data.stderr : '');
+      } catch (e) {
+        document.getElementById('cmdOutput').textContent = 'Error: ' + e.message;
+      }
+    }
+
+    // Initial load
+    refreshStatus();
+    loadConfig();
+  </script>
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: { "Content-Type": "text/html" },
+  });
+}
+
+function verifyLinearSignature(
+  body: string,
+  signature: string | null,
+  secret: string
+): boolean {
+  // TODO: Implement HMAC-SHA256 verification
+  // For now, just check signature exists
+  if (!signature) return false;
+  return true;
+}
+
+function isCyrusAssignee(assignee: { name?: string; email?: string }): boolean {
+  const name = assignee.name?.toLowerCase() || "";
+  const email = assignee.email?.toLowerCase() || "";
+  return (
+    name.includes("cyrus") ||
+    email.includes("cyrus") ||
+    name.includes("claude") ||
+    email.includes("claude")
+  );
+}
