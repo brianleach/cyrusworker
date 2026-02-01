@@ -1,5 +1,7 @@
 # CyrusWorker
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/brianleach/cyrusworker)
+
 Run [Cyrus](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using Sandbox SDK.
 
 Inspired by [Moltworker](https://github.com/cloudflare/moltworker).
@@ -12,7 +14,8 @@ Instead of running Cyrus on a local Mac mini or VPS:
 - **Always on** - No need to keep a local machine running
 - **Global edge** - Low latency webhook processing worldwide
 - **Persistent storage** - R2 backup of config and state
-- **Secure** - Optional Cloudflare Access authentication
+- **Secure** - Webhook signature verification protects endpoints
+- **PHI-conscious** - Minimizes logging of Linear issue content (see [CLAUDE.md](./CLAUDE.md#hipaaphi-considerations))
 
 ## Requirements
 
@@ -136,8 +139,6 @@ Access at: `https://your-worker.workers.dev/_admin/`
 | `GIT_USER_EMAIL` | Yes | Git commit author email |
 | `LINEAR_WEBHOOK_SECRET` | Yes | Linear webhook signing secret |
 | `GIT_SSH_PRIVATE_KEY` | No | SSH private key for private repos |
-| `CF_ACCESS_TEAM_DOMAIN` | No | Cloudflare Access team domain |
-| `CF_ACCESS_AUD` | No | Cloudflare Access audience |
 
 ### Where to Get Each Secret
 
@@ -182,14 +183,6 @@ ssh-keygen -t ed25519 -C "cyrus@your-domain.com" -f cyrus-key -N ""
 ```
 - Add `cyrus-key.pub` as a deploy key in your GitHub repo settings
 - Use `cyrus-key` (private key) as the secret value
-
-#### CF_ACCESS_TEAM_DOMAIN / CF_ACCESS_AUD (Optional)
-For protecting the Admin UI with Cloudflare Access:
-1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
-2. Navigate to **Access → Applications**
-3. Create a new application for your worker
-4. **Team domain**: Found in **Settings → Custom Pages** (e.g., `yourteam.cloudflareaccess.com`)
-5. **Audience (AUD)**: Found in your application's settings under **Overview → Application Audience (AUD) Tag**
 
 ## Private Repository Access
 
@@ -247,7 +240,7 @@ npm run dev
 
 ## Architecture
 
-See [PROMPT-KICKSTART.md](./PROMPT-KICKSTART.md) for full architecture details.
+See [CLAUDE.md](./CLAUDE.md) for architecture details.
 
 ## License
 

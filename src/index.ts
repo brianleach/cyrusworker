@@ -6,8 +6,6 @@ interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   CYRUS_STORAGE: R2Bucket;
   LINEAR_WEBHOOK_SECRET?: string;
-  CF_ACCESS_TEAM_DOMAIN?: string;
-  CF_ACCESS_AUD?: string;
   ANTHROPIC_API_KEY?: string;
   GH_TOKEN?: string;
   GIT_USER_NAME?: string;
@@ -109,17 +107,22 @@ async function handleLinearWebhook(
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
   // Process issue in sandbox
+  // Write issue data to temp file to avoid exposing PHI/PII in command args or logs
   const issueJson = JSON.stringify(payload.data);
-  const result = await sandbox.exec(
-    `echo 'Processing issue: ${payload.data?.identifier}' && cyrus process-issue '${issueJson}'`
-  );
+  const issueId = payload.data?.id || "unknown";
+  const tempFile = `/tmp/issue-${issueId}.json`;
 
+  await sandbox.exec(`cat > ${tempFile} << 'ISSUE_EOF'
+${issueJson}
+ISSUE_EOF`);
+
+  const result = await sandbox.exec(`cyrus process-issue "$(cat ${tempFile})" && rm -f ${tempFile}`);
+
+  // Don't return stdout/stderr to avoid leaking PHI/PII
   return Response.json({
     status: "processed",
     issue: payload.data?.identifier,
     success: result.success,
-    output: result.stdout,
-    error: result.stderr,
   });
 }
 
@@ -130,9 +133,9 @@ async function handleApiRoutes(
 ): Promise<Response> {
   const sandbox = getSandbox(env.Sandbox, "primary");
 
-  // Get sandbox status
+  // Get sandbox status (avoid showing full command args which could contain PHI/PII)
   if (url.pathname === "/api/status") {
-    const result = await sandbox.exec("ps aux && echo '---' && df -h");
+    const result = await sandbox.exec("ps -eo pid,comm,etime,pcpu,pmem --no-headers && echo '---' && df -h");
     return Response.json({
       output: result.stdout,
       success: result.success,
@@ -150,6 +153,7 @@ async function handleApiRoutes(
   }
 
   // Trigger backup
+  // WARNING: Backup may contain PHI/PII if Cyrus caches issue data in ~/.cyrus
   if (url.pathname === "/api/backup" && request.method === "POST") {
     const result = await sandbox.exec(
       "tar -czf /tmp/cyrus-backup.tar.gz -C /root .cyrus 2>/dev/null && base64 /tmp/cyrus-backup.tar.gz"
@@ -168,7 +172,9 @@ async function handleApiRoutes(
     return Response.json({ success: false, error: result.stderr });
   }
 
-  // Execute command (protected - only for admin)
+  // Execute command in sandbox
+  // WARNING: Output may contain PHI/PII from Linear issues. Do not log responses.
+  // This endpoint is required for Cyrus to process issues but use caution with admin debugging.
   if (url.pathname === "/api/exec" && request.method === "POST") {
     const { command } = (await request.json()) as { command: string };
     const result = await sandbox.exec(command);
