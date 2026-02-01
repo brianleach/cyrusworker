@@ -19,10 +19,10 @@ CyrusWorker runs the Cyrus AI agent (Claude Code-powered Linear agent) on Cloudf
 
 **Worker (src/index.ts)** - Single-file Cloudflare Worker handling all routes:
 - `/health` - Health check endpoint
-- `/webhook/linear` - Receives Linear webhooks, verifies signatures, dispatches to sandbox
+- `/webhook` - Receives Linear AgentSessionEvent webhooks (delegation, mentions, prompts)
+- `/callback` - Linear OAuth callback for app installation
 - `/_admin/` - Admin UI for monitoring sandbox status, viewing config, triggering backups
 - `/api/*` - Internal API routes (status, config, backup, exec)
-- `/oauth/callback` - Linear OAuth flow (incomplete)
 
 **Sandbox Container (Dockerfile)** - Runs in Cloudflare Containers with:
 - Node.js 22, git, GitHub CLI
@@ -38,19 +38,21 @@ CyrusWorker runs the Cyrus AI agent (Claude Code-powered Linear agent) on Cloudf
 
 ### Data Flow
 
-1. Linear webhook arrives at Worker
-2. Worker verifies signature using `LINEAR_WEBHOOK_SECRET`
-3. If issue is assigned to Cyrus (name/email contains "cyrus" or "claude"), Worker gets sandbox instance
-4. Worker executes `cyrus process-issue` in sandbox via `sandbox.exec()`
-5. Sandbox container runs Claude Code to process the issue
-6. Config state can be backed up to R2 bucket (`CYRUS_STORAGE`)
+1. User delegates issue to Cyrus or @mentions it in Linear
+2. Linear sends AgentSessionEvent webhook to Worker
+3. Worker verifies signature using `LINEAR_WEBHOOK_SECRET`
+4. Worker gets sandbox instance for the organization
+5. Worker executes `cyrus process-issue` (for new sessions) or `cyrus process-prompt` (for follow-ups) in sandbox
+6. Sandbox container runs Claude Code to process the issue
+7. Config state can be backed up to R2 bucket (`CYRUS_STORAGE`)
 
 ### API Routes
 
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/health` | GET | Returns "OK" - health check |
-| `/webhook/linear` | POST | Linear webhook receiver |
+| `/webhook` | POST | Linear AgentSessionEvent webhook receiver |
+| `/callback` | GET | Linear OAuth callback |
 | `/api/status` | GET | Sandbox process and disk status |
 | `/api/config` | GET | Current Cyrus config JSON |
 | `/api/backup` | POST | Backup config to R2 |
@@ -68,7 +70,9 @@ Set via `npx wrangler secret put <NAME>`:
 - `ANTHROPIC_API_KEY` - Claude API key for Claude Code
 - `GH_TOKEN` - GitHub PAT for PR creation
 - `GIT_USER_NAME`, `GIT_USER_EMAIL` - Git commit identity
-- `LINEAR_WEBHOOK_SECRET` - Webhook signature verification
+- `LINEAR_CLIENT_ID` - Linear OAuth Application client ID
+- `LINEAR_CLIENT_SECRET` - Linear OAuth Application client secret
+- `LINEAR_WEBHOOK_SECRET` - Linear OAuth Application webhook signing secret
 - `GIT_SSH_PRIVATE_KEY` (optional) - SSH key for private repos
 
 ## Security Model
@@ -98,9 +102,9 @@ When working on this codebase, avoid adding logging that could capture issue tit
 
 ## Key Functions
 
-- `handleLinearWebhook()` - Verifies signature, checks assignee, dispatches to sandbox
-- `isCyrusAssignee()` - Returns true if assignee name/email contains "cyrus" or "claude"
+- `handleAgentSessionWebhook()` - Handles Linear AgentSessionEvent webhooks (created/prompted actions)
 - `verifyLinearSignature()` - TODO: needs proper HMAC-SHA256 implementation
+- `handleOAuthCallback()` - TODO: needs token exchange implementation
 - `handleAdminUI()` - Returns inline HTML for admin dashboard
 
 ## Known TODOs

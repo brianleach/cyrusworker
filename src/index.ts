@@ -6,25 +6,42 @@ interface Env {
   Sandbox: DurableObjectNamespace<Sandbox>;
   CYRUS_STORAGE: R2Bucket;
   LINEAR_WEBHOOK_SECRET?: string;
+  LINEAR_CLIENT_ID?: string;
+  LINEAR_CLIENT_SECRET?: string;
   ANTHROPIC_API_KEY?: string;
   GH_TOKEN?: string;
   GIT_USER_NAME?: string;
   GIT_USER_EMAIL?: string;
 }
 
-interface LinearWebhookPayload {
-  type: string;
-  action: string;
+interface AgentSessionWebhookPayload {
+  type: string; // "AgentSessionEvent"
+  action: string; // "created" | "prompted"
   organizationId: string;
-  data?: {
+  webhookId: string;
+  webhookTimestamp: number;
+  promptContext?: string; // Formatted XML string with issue details, comments, guidance
+  agentSession?: {
     id: string;
-    identifier: string;
-    title: string;
-    assignee?: {
+    issue?: {
       id: string;
-      name: string;
-      email: string;
+      identifier: string;
+      title: string;
+      description?: string;
+      team?: {
+        id: string;
+        name: string;
+        key: string;
+      };
     };
+    comment?: {
+      id: string;
+      body: string;
+    };
+  };
+  agentActivity?: {
+    id: string;
+    body?: string; // User's message for "prompted" action
   };
 }
 
@@ -38,13 +55,13 @@ export default {
         return new Response("OK", { status: 200 });
       }
 
-      // Linear webhook endpoint
-      if (url.pathname === "/webhook/linear" && request.method === "POST") {
-        return await handleLinearWebhook(request, env);
+      // Linear Agent Session webhook endpoint
+      if (url.pathname === "/webhook" && request.method === "POST") {
+        return await handleAgentSessionWebhook(request, env);
       }
 
       // Linear OAuth callback
-      if (url.pathname === "/oauth/callback") {
+      if (url.pathname === "/callback") {
         return handleOAuthCallback(request, env);
       }
 
@@ -61,7 +78,7 @@ export default {
       // Root
       if (url.pathname === "/") {
         return new Response(
-          "CyrusWorker - Claude Code Linear Agent on Cloudflare\n\nEndpoints:\n- /_admin/ - Admin UI\n- /webhook/linear - Linear webhook\n- /health - Health check",
+          "CyrusWorker - Claude Code Linear Agent on Cloudflare\n\nEndpoints:\n- /_admin/ - Admin UI\n- /webhook - Linear AgentSessionEvent webhook\n- /callback - Linear OAuth callback\n- /health - Health check",
           { headers: { "Content-Type": "text/plain" } }
         );
       }
@@ -74,7 +91,7 @@ export default {
   },
 };
 
-async function handleLinearWebhook(
+async function handleAgentSessionWebhook(
   request: Request,
   env: Env
 ): Promise<Response> {
@@ -88,42 +105,67 @@ async function handleLinearWebhook(
     }
   }
 
-  const payload: LinearWebhookPayload = JSON.parse(body);
+  const payload: AgentSessionWebhookPayload = JSON.parse(body);
   console.log("Linear webhook:", payload.type, payload.action);
 
-  // Only process issue updates
-  if (payload.type !== "Issue") {
-    return Response.json({ status: "ignored", reason: "not an issue" });
+  // Only process AgentSessionEvent webhooks
+  if (payload.type !== "AgentSessionEvent") {
+    return Response.json({ status: "ignored", reason: "not an agent session event" });
   }
 
-  // Check if assigned to Cyrus
-  const assignee = payload.data?.assignee;
-  if (!assignee || !isCyrusAssignee(assignee)) {
-    return Response.json({ status: "ignored", reason: "not assigned to cyrus" });
+  // Must respond within 5 seconds, so return quickly and process async
+  const agentSession = payload.agentSession;
+  if (!agentSession) {
+    return Response.json({ status: "ignored", reason: "no agent session" });
   }
 
-  // Get sandbox instance
+  // Get sandbox instance per organization
   const sandboxId = `workspace-${payload.organizationId}`;
   const sandbox = getSandbox(env.Sandbox, sandboxId);
 
-  // Process issue in sandbox
-  // Write issue data to temp file to avoid exposing PHI/PII in command args or logs
-  const issueJson = JSON.stringify(payload.data);
-  const issueId = payload.data?.id || "unknown";
-  const tempFile = `/tmp/issue-${issueId}.json`;
+  // Write webhook payload to temp file to avoid exposing PHI/PII in command args
+  const sessionId = agentSession.id || "unknown";
+  const tempFile = `/tmp/session-${sessionId}.json`;
 
-  await sandbox.exec(`cat > ${tempFile} << 'ISSUE_EOF'
-${issueJson}
-ISSUE_EOF`);
-
-  const result = await sandbox.exec(`cyrus process-issue "$(cat ${tempFile})" && rm -f ${tempFile}`);
-
-  // Don't return stdout/stderr to avoid leaking PHI/PII
-  return Response.json({
-    status: "processed",
-    issue: payload.data?.identifier,
-    success: result.success,
+  // Include full payload for Cyrus to process
+  const sessionData = JSON.stringify({
+    action: payload.action,
+    sessionId: agentSession.id,
+    issue: agentSession.issue,
+    comment: agentSession.comment,
+    promptContext: payload.promptContext,
+    userMessage: payload.agentActivity?.body, // For "prompted" actions
   });
+
+  await sandbox.exec(`cat > ${tempFile} << 'SESSION_EOF'
+${sessionData}
+SESSION_EOF`);
+
+  // Handle based on action type
+  if (payload.action === "created") {
+    // New delegation or mention - start processing
+    const result = await sandbox.exec(
+      `cyrus process-issue "$(cat ${tempFile})" && rm -f ${tempFile}`
+    );
+    return Response.json({
+      status: "processed",
+      sessionId: agentSession.id,
+      issue: agentSession.issue?.identifier,
+      success: result.success,
+    });
+  } else if (payload.action === "prompted") {
+    // Follow-up message from user
+    const result = await sandbox.exec(
+      `cyrus process-prompt "$(cat ${tempFile})" && rm -f ${tempFile}`
+    );
+    return Response.json({
+      status: "prompted",
+      sessionId: agentSession.id,
+      success: result.success,
+    });
+  }
+
+  return Response.json({ status: "ignored", reason: "unknown action" });
 }
 
 async function handleApiRoutes(
@@ -370,13 +412,3 @@ function verifyLinearSignature(
   return true;
 }
 
-function isCyrusAssignee(assignee: { name?: string; email?: string }): boolean {
-  const name = assignee.name?.toLowerCase() || "";
-  const email = assignee.email?.toLowerCase() || "";
-  return (
-    name.includes("cyrus") ||
-    email.includes("cyrus") ||
-    name.includes("claude") ||
-    email.includes("claude")
-  );
-}

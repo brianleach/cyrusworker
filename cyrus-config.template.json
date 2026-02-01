@@ -1,5 +1,10 @@
 {
-  "repositories": [],
+  "repositories": [
+    {
+      "url": "https://github.com/brianleach/cyrusworker.git",
+      "path": "/data/repos/cyrusworker"
+    }
+  ],
   "promptDefaults": {
     "debugger": {
       "allowedTools": "readOnly"
