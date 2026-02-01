@@ -1,5 +1,5 @@
-# Build cache bust: 2025-01-31-v1
-FROM cloudflare/sandbox:latest
+# Build cache bust: 2026-02-01-v1
+FROM docker.io/cloudflare/sandbox:0.7.0
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -22,8 +22,11 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
 # Install Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# Install Cyrus
-RUN npm install -g cyrus-ai
+# Install Cyrus from source
+RUN git clone https://github.com/ceedaragents/cyrus.git /opt/cyrus \
+    && cd /opt/cyrus \
+    && npm install \
+    && npm link
 
 # Create working directories
 RUN mkdir -p /root/.cyrus /data/repos /data/worktrees /data/backup

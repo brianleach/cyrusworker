@@ -55,6 +55,10 @@ CyrusWorker runs the Cyrus AI agent (Claude Code-powered Linear agent) on Cloudf
 | `/callback` | GET | Linear OAuth callback |
 | `/api/status` | GET | Sandbox process and disk status |
 | `/api/config` | GET | Current Cyrus config JSON |
+| `/api/init` | POST | Initialize Cyrus .env file from Worker secrets |
+| `/api/auth` | POST | Start Cyrus self-auth flow (returns auth URL) |
+| `/api/add-repo` | POST | Add repository to Cyrus (JSON body: `{url: string, workspace?: string}`) |
+| `/api/restart` | POST | Restart container processes |
 | `/api/backup` | POST | Backup config to R2 |
 | `/api/exec` | POST | Execute command in sandbox (JSON body: `{command: string}`) |
 | `/_admin/` | GET | Admin UI (HTML) |
@@ -110,4 +114,4 @@ When working on this codebase, avoid adding logging that could capture issue tit
 ## Known TODOs
 
 - `verifyLinearSignature()` needs proper HMAC-SHA256 implementation (currently just checks signature exists)
-- OAuth callback needs token exchange and R2 storage
+- `handleOAuthCallback()` needs token exchange and R2 storage for `cyrus self-auth` flow

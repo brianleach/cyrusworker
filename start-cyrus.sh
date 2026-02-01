@@ -57,5 +57,6 @@ echo "Cyrus config: /root/.cyrus/config.json"
 echo "Repos dir: /data/repos"
 echo "Worktrees dir: /data/worktrees"
 
-# Keep container running, wait for commands from Worker
-exec tail -f /dev/null
+# Start Cyrus server
+echo "Starting Cyrus..."
+exec cyrus
