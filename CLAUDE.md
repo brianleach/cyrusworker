@@ -114,4 +114,12 @@ When working on this codebase, avoid adding logging that could capture issue tit
 ## Known TODOs
 
 - `verifyLinearSignature()` needs proper HMAC-SHA256 implementation (currently just checks signature exists)
-- `handleOAuthCallback()` needs token exchange and R2 storage for `cyrus self-auth` flow
+
+## Cyrus Source
+
+**IMPORTANT**: Cyrus is the `cyrus-ai` package from https://github.com/ceedaragents/cyrus
+
+- It's a **pnpm monorepo** - must use `pnpm install && pnpm build`
+- CLI is at `apps/cli` with binary at `dist/src/app.js`
+- Runs as a server to receive Linear webhooks and process issues via Claude Code
+- Do NOT confuse with any other project - this IS the Claude Code Linear agent

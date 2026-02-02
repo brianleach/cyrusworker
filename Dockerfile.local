@@ -1,0 +1,40 @@
+# Local testing Dockerfile - uses standard node image instead of cloudflare/sandbox
+FROM node:22-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    openssh-client \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI and pnpm
+RUN npm install -g @anthropic-ai/claude-code pnpm
+
+# Install Cyrus from source (pnpm monorepo)
+RUN git clone https://github.com/ceedaragents/cyrus.git /opt/cyrus \
+    && cd /opt/cyrus \
+    && pnpm install \
+    && pnpm build \
+    && ln -s /opt/cyrus/apps/cli/dist/src/app.js /usr/local/bin/cyrus \
+    && chmod +x /opt/cyrus/apps/cli/dist/src/app.js
+
+# Create working directories
+RUN mkdir -p /root/.cyrus /data/repos /data/worktrees /data/backup
+
+# Copy startup script and config template
+COPY start-cyrus.sh /usr/local/bin/start-cyrus.sh
+COPY cyrus-config.template.json /root/cyrus-config.template.json
+RUN chmod +x /usr/local/bin/start-cyrus.sh
+
+WORKDIR /data
+
+CMD ["/usr/local/bin/start-cyrus.sh"]

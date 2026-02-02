@@ -62,7 +62,7 @@ export default {
 
       // Linear OAuth callback
       if (url.pathname === "/callback") {
-        return handleOAuthCallback(request, env);
+        return await handleOAuthCallback(request, env);
       }
 
       // Admin UI
@@ -348,18 +348,160 @@ echo "init complete"
   return new Response("Not Found", { status: 404 });
 }
 
-function handleOAuthCallback(request: Request, env: Env): Response {
+async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
+  const error = url.searchParams.get("error");
 
-  // TODO: Exchange code for tokens, store in R2
-  console.log("OAuth callback:", { code: !!code, state });
+  // Handle OAuth errors
+  if (error) {
+    const errorDescription = url.searchParams.get("error_description") || "Unknown error";
+    return new Response(
+      `OAuth Error: ${error}\n\n${errorDescription}`,
+      { status: 400, headers: { "Content-Type": "text/plain" } }
+    );
+  }
 
-  return new Response(
-    "OAuth complete! You can close this window and return to CyrusWorker.",
-    { headers: { "Content-Type": "text/plain" } }
-  );
+  if (!code) {
+    return new Response(
+      "Missing authorization code",
+      { status: 400, headers: { "Content-Type": "text/plain" } }
+    );
+  }
+
+  if (!env.LINEAR_CLIENT_ID || !env.LINEAR_CLIENT_SECRET) {
+    return new Response(
+      "OAuth not configured: missing LINEAR_CLIENT_ID or LINEAR_CLIENT_SECRET",
+      { status: 500, headers: { "Content-Type": "text/plain" } }
+    );
+  }
+
+  try {
+    // Exchange authorization code for tokens
+    const tokenResponse = await fetch("https://api.linear.app/oauth/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: env.LINEAR_CLIENT_ID,
+        client_secret: env.LINEAR_CLIENT_SECRET,
+        redirect_uri: `${url.origin}/callback`,
+        code,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error("Token exchange failed:", errorText);
+      return new Response(
+        `Token exchange failed: ${tokenResponse.status}\n\n${errorText}`,
+        { status: 500, headers: { "Content-Type": "text/plain" } }
+      );
+    }
+
+    const tokens = await tokenResponse.json() as {
+      access_token: string;
+      token_type: string;
+      expires_in?: number;
+      scope?: string;
+    };
+
+    // Get organization info to identify the workspace
+    const orgResponse = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${tokens.access_token}`,
+      },
+      body: JSON.stringify({
+        query: `{ organization { id name } }`,
+      }),
+    });
+
+    let orgInfo = { id: "unknown", name: "Unknown Workspace" };
+    if (orgResponse.ok) {
+      const orgData = await orgResponse.json() as { data?: { organization?: { id: string; name: string } } };
+      if (orgData.data?.organization) {
+        orgInfo = orgData.data.organization;
+      }
+    }
+
+    // Store tokens in R2 for persistence
+    const tokenData = {
+      access_token: tokens.access_token,
+      token_type: tokens.token_type,
+      expires_in: tokens.expires_in,
+      scope: tokens.scope,
+      organization_id: orgInfo.id,
+      organization_name: orgInfo.name,
+      created_at: Date.now(),
+    };
+
+    await env.CYRUS_STORAGE.put(
+      `tokens/${orgInfo.id}.json`,
+      JSON.stringify(tokenData, null, 2)
+    );
+
+    // Also store as "latest" for easy access
+    await env.CYRUS_STORAGE.put(
+      "tokens/latest.json",
+      JSON.stringify(tokenData, null, 2)
+    );
+
+    // Initialize the sandbox with the new token
+    const sandboxId = `workspace-${orgInfo.id}`;
+    const sandbox = getSandbox(env.Sandbox, sandboxId);
+
+    // Write token to Cyrus config in sandbox
+    const tokenFile = `/root/.cyrus/tokens/${orgInfo.id}.json`;
+    await sandbox.exec(`mkdir -p /root/.cyrus/tokens`);
+    await sandbox.exec(`cat > ${tokenFile} << 'TOKEN_EOF'
+${JSON.stringify(tokenData, null, 2)}
+TOKEN_EOF`);
+
+    // Return success page
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Cyrus - Authorization Complete</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+    .success { color: #155724; background: #d4edda; padding: 20px; border-radius: 8px; }
+    .info { background: #f8f9fa; padding: 15px; border-radius: 4px; margin-top: 20px; }
+    code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="success">
+    <h2>✅ Authorization Complete!</h2>
+    <p>Cyrus is now connected to <strong>${orgInfo.name}</strong>.</p>
+  </div>
+  <div class="info">
+    <p><strong>Next steps:</strong></p>
+    <ol>
+      <li>Add a repository using the admin panel or API</li>
+      <li>Delegate an issue to Cyrus in Linear</li>
+    </ol>
+    <p>Organization ID: <code>${orgInfo.id}</code></p>
+  </div>
+  <p>You can close this window.</p>
+</body>
+</html>`;
+
+    return new Response(html, {
+      headers: { "Content-Type": "text/html" },
+    });
+
+  } catch (error) {
+    console.error("OAuth callback error:", error);
+    return new Response(
+      `OAuth callback error: ${error}`,
+      { status: 500, headers: { "Content-Type": "text/plain" } }
+    );
+  }
 }
 
 function handleAdminUI(request: Request, env: Env): Response {
