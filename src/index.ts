@@ -269,7 +269,7 @@ async function cloneMissingRepos(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     try {
@@ -280,7 +280,7 @@ export default {
 
       // Linear Agent Session webhook endpoint
       if (url.pathname === "/webhook" && request.method === "POST") {
-        return await handleAgentSessionWebhook(request, env);
+        return await handleAgentSessionWebhook(request, env, ctx);
       }
 
       // Linear OAuth callback
@@ -387,71 +387,76 @@ async function runBootstrap(
 
 async function handleAgentSessionWebhook(
   request: Request,
-  env: Env
+  env: Env,
+  ctx: ExecutionContext
 ): Promise<Response> {
   const body = await request.text();
   const url = new URL(request.url);
+  const signature = request.headers.get("linear-signature") || "";
 
   // Verify webhook signature if secret is configured
   if (env.LINEAR_WEBHOOK_SECRET) {
-    const signature = request.headers.get("linear-signature");
     if (!verifyLinearSignature(body, signature, env.LINEAR_WEBHOOK_SECRET)) {
       return new Response("Invalid signature", { status: 401 });
     }
   }
 
-  const payload: AgentSessionWebhookPayload = JSON.parse(body);
-  console.log("Linear webhook:", payload.type, payload.action);
-
-  // Get sandbox instance
-  const sandbox = getSandbox(env.Sandbox, "primary");
-
-  // Check if Cyrus is running, auto-bootstrap if not
-  const healthCheck = await sandbox.exec("curl -s -o /dev/null -w '%{http_code}' http://localhost:3456/status 2>/dev/null || echo '000'");
-  const isRunning = healthCheck.stdout && !healthCheck.stdout.includes("000");
-
-  if (!isRunning) {
-    console.log("Cyrus not running, auto-bootstrapping...");
-    const bootstrapSteps = await runBootstrap(sandbox, env, url.origin);
-    console.log("Bootstrap complete:", bootstrapSteps);
-    // Give Cyrus a moment to fully initialize
-    await sandbox.exec("sleep 2");
-  }
-
-  // Forward webhook to Cyrus running on port 3456 inside the container
+  // Parse payload for logging (minimal info only)
+  let webhookType = "unknown";
+  let webhookAction = "unknown";
   try {
-    const forwardResult = await sandbox.exec(
-      `curl -s -X POST http://localhost:3456/webhook -H "Content-Type: application/json" -H "linear-signature: ${request.headers.get("linear-signature") || ""}" -d '${body.replace(/'/g, "'\\''")}'`
-    );
+    const payload: AgentSessionWebhookPayload = JSON.parse(body);
+    webhookType = payload.type;
+    webhookAction = payload.action;
+  } catch {
+    // Invalid JSON - still accept and let Cyrus handle it
+  }
+  console.log("Linear webhook received:", webhookType, webhookAction);
 
-    console.log("Forwarded to Cyrus, response:", forwardResult.stdout?.substring(0, 200));
+  // Return 200 immediately to Linear - process in background
+  // This prevents "did not respond" errors during cold starts
+  ctx.waitUntil(processWebhookInBackground(env, url.origin, body, signature));
 
-    if (forwardResult.success && forwardResult.stdout) {
-      try {
-        const cyrusResponse = JSON.parse(forwardResult.stdout);
-        return Response.json({
-          status: "forwarded",
-          cyrusResponse,
-        });
-      } catch {
-        // Cyrus might return non-JSON
-        return Response.json({
-          status: "forwarded",
-          cyrusResponse: forwardResult.stdout,
-        });
-      }
+  return Response.json({
+    status: "accepted",
+    message: "Webhook received, processing in background",
+  });
+}
+
+// Process webhook in background after returning 200 to Linear
+async function processWebhookInBackground(
+  env: Env,
+  baseUrl: string,
+  body: string,
+  signature: string
+): Promise<void> {
+  try {
+    const sandbox = getSandbox(env.Sandbox, "primary");
+
+    // Check if Cyrus is running, auto-bootstrap if not
+    const healthCheck = await sandbox.exec("curl -s -o /dev/null -w '%{http_code}' http://localhost:3456/status 2>/dev/null || echo '000'");
+    const isRunning = healthCheck.stdout && !healthCheck.stdout.includes("000");
+
+    if (!isRunning) {
+      console.log("Cyrus not running, auto-bootstrapping...");
+      const bootstrapSteps = await runBootstrap(sandbox, env, baseUrl);
+      console.log("Bootstrap complete:", bootstrapSteps);
+      // Give Cyrus a moment to fully initialize
+      await sandbox.exec("sleep 2");
     }
 
-    return Response.json({
-      status: "forward_failed",
-      error: forwardResult.stderr || "Unknown error",
-    });
+    // Forward webhook to Cyrus running on port 3456 inside the container
+    const forwardResult = await sandbox.exec(
+      `curl -s -X POST http://localhost:3456/webhook -H "Content-Type: application/json" -H "linear-signature: ${signature}" -d '${body.replace(/'/g, "'\\''")}'`
+    );
+
+    if (forwardResult.success) {
+      console.log("Webhook forwarded to Cyrus successfully");
+    } else {
+      console.error("Failed to forward webhook to Cyrus:", forwardResult.stderr);
+    }
   } catch (error) {
-    console.error("Failed to forward webhook:", error);
-    return Response.json({
-      status: "error",
-      error: String(error),
-    }, { status: 500 });
+    console.error("Error processing webhook in background:", error);
   }
 }
 
