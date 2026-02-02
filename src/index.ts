@@ -872,12 +872,15 @@ function handleAdminUI(request: Request, env: Env): Response {
     * { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      max-width: 900px;
+      max-width: 1000px;
       margin: 0 auto;
       padding: 20px;
       background: #f5f5f5;
     }
-    h1 { color: #333; }
+    h1 { color: #333; margin-bottom: 8px; }
+    .subtitle { color: #666; margin-bottom: 20px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
     .card {
       background: white;
       border-radius: 8px;
@@ -885,123 +888,322 @@ function handleAdminUI(request: Request, env: Env): Response {
       margin: 16px 0;
       box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .card h2 { margin-top: 0; color: #444; }
+    .card.full { grid-column: 1 / -1; }
+    .card h2 { margin-top: 0; color: #444; font-size: 18px; }
     button {
       background: #0066cc;
       color: white;
       border: none;
-      padding: 10px 20px;
+      padding: 8px 16px;
       border-radius: 4px;
       cursor: pointer;
       margin-right: 8px;
+      font-size: 14px;
     }
     button:hover { background: #0055aa; }
     button.secondary { background: #666; }
+    button.danger { background: #dc3545; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
     pre {
       background: #1e1e1e;
       color: #d4d4d4;
-      padding: 16px;
+      padding: 12px;
       border-radius: 4px;
       overflow-x: auto;
-      font-size: 13px;
+      font-size: 12px;
+      max-height: 200px;
+      margin: 8px 0;
     }
-    .status {
+    .status-badge {
       display: inline-block;
       padding: 4px 12px;
       border-radius: 12px;
-      font-size: 14px;
+      font-size: 13px;
+      font-weight: 500;
     }
-    .status.ok { background: #d4edda; color: #155724; }
-    .status.error { background: #f8d7da; color: #721c24; }
+    .status-badge.ok { background: #d4edda; color: #155724; }
+    .status-badge.error { background: #f8d7da; color: #721c24; }
+    .status-badge.warning { background: #fff3cd; color: #856404; }
     input[type="text"] {
       width: 100%;
       padding: 8px;
       border: 1px solid #ddd;
       border-radius: 4px;
       margin-bottom: 8px;
+      font-size: 14px;
     }
+    .repo-list { list-style: none; padding: 0; margin: 0; }
+    .repo-item {
+      padding: 12px;
+      border: 1px solid #eee;
+      border-radius: 4px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .repo-item .name { font-weight: 600; color: #333; }
+    .repo-item .path { font-size: 12px; color: #666; }
+    .repo-item .workspace { font-size: 12px; color: #0066cc; }
+    .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+    .stat-box { text-align: center; padding: 16px; background: #f8f9fa; border-radius: 8px; }
+    .stat-box .value { font-size: 28px; font-weight: 700; color: #333; }
+    .stat-box .label { font-size: 12px; color: #666; margin-top: 4px; }
+    .log-output { font-family: monospace; font-size: 11px; white-space: pre-wrap; }
+    .inline-form { display: flex; gap: 8px; }
+    .inline-form input { flex: 1; margin-bottom: 0; }
+    .section-status { float: right; }
   </style>
 </head>
 <body>
   <h1>CyrusWorker Admin</h1>
+  <p class="subtitle">Claude Code Linear Agent on Cloudflare</p>
 
-  <div class="card">
-    <h2>Sandbox Status</h2>
-    <div id="status">Loading...</div>
-    <button onclick="refreshStatus()">Refresh</button>
-    <button class="secondary" onclick="restartContainer()">Restart Container</button>
-    <span id="restartStatus"></span>
+  <div class="grid">
+    <div class="card">
+      <h2>Cyrus Status <span class="section-status" id="cyrusStatusBadge"></span></h2>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <div class="value" id="statRepos">-</div>
+          <div class="label">Repositories</div>
+        </div>
+        <div class="stat-box">
+          <div class="value" id="statStatus">-</div>
+          <div class="label">Status</div>
+        </div>
+        <div class="stat-box">
+          <div class="value" id="statVersion">-</div>
+          <div class="label">Version</div>
+        </div>
+      </div>
+      <button onclick="refreshCyrusStatus()">Refresh</button>
+      <button class="secondary" onclick="bootstrap()">Bootstrap</button>
+      <span id="cyrusActionStatus"></span>
+    </div>
+
+    <div class="card">
+      <h2>Container</h2>
+      <div id="containerStatus">Loading...</div>
+      <button onclick="refreshContainer()">Refresh</button>
+      <button class="secondary" onclick="restartContainer()">Restart</button>
+      <span id="containerActionStatus"></span>
+    </div>
   </div>
 
   <div class="card">
-    <h2>Configuration</h2>
-    <pre id="config">Loading...</pre>
-    <button onclick="loadConfig()">Reload Config</button>
+    <h2>Repositories</h2>
+    <ul class="repo-list" id="repoList">
+      <li>Loading...</li>
+    </ul>
+    <hr style="margin: 16px 0; border: none; border-top: 1px solid #eee;">
+    <h3 style="font-size: 14px; margin-bottom: 12px;">Add Repository</h3>
+    <div class="inline-form">
+      <input type="text" id="repoUrl" placeholder="https://github.com/org/repo" />
+      <input type="text" id="repoWorkspace" placeholder="Workspace name (optional)" style="max-width: 200px;" />
+      <button onclick="addRepo()">Add</button>
+    </div>
+    <div id="addRepoStatus" style="margin-top: 8px; font-size: 13px;"></div>
   </div>
 
   <div class="card">
-    <h2>Backup</h2>
-    <p>Backup Cyrus config to R2 storage.</p>
-    <button onclick="triggerBackup()">Backup Now</button>
-    <span id="backupStatus"></span>
+    <h2>Cyrus Logs</h2>
+    <pre id="cyrusLogs" class="log-output">Loading...</pre>
+    <button onclick="refreshLogs()">Refresh Logs</button>
   </div>
 
-  <div class="card">
-    <h2>Execute Command</h2>
-    <input type="text" id="cmdInput" placeholder="Enter command (e.g., ls -la /root/.cyrus)" />
-    <button onclick="execCommand()">Execute</button>
-    <pre id="cmdOutput"></pre>
+  <div class="grid">
+    <div class="card">
+      <h2>Storage</h2>
+      <button onclick="saveConfig()">Save to R2</button>
+      <button onclick="restoreConfig()">Restore from R2</button>
+      <span id="storageStatus"></span>
+    </div>
+
+    <div class="card">
+      <h2>Execute Command</h2>
+      <div class="inline-form">
+        <input type="text" id="cmdInput" placeholder="ls -la /root/.cyrus" />
+        <button onclick="execCommand()">Run</button>
+      </div>
+      <pre id="cmdOutput" style="min-height: 60px;"></pre>
+    </div>
   </div>
 
   <script>
-    async function refreshStatus() {
-      document.getElementById('status').innerHTML = 'Loading...';
+    // Cyrus Status
+    async function refreshCyrusStatus() {
       try {
-        const res = await fetch('/api/status');
-        const data = await res.json();
-        document.getElementById('status').innerHTML =
-          '<span class="status ok">Running</span><pre>' + (data.output || 'No output') + '</pre>';
+        const [configRes, statusRes] = await Promise.all([
+          fetch('/api/config'),
+          fetch('/api/exec', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'curl -s http://localhost:3456/status 2>/dev/null && curl -s http://localhost:3456/version 2>/dev/null || echo "offline"' })
+          })
+        ]);
+
+        const config = await configRes.json();
+        const statusData = await statusRes.json();
+
+        const repos = config.repositories || [];
+        document.getElementById('statRepos').textContent = repos.length;
+
+        // Parse Cyrus status
+        let cyrusStatus = 'offline';
+        let cyrusVersion = '-';
+        if (statusData.stdout && !statusData.stdout.includes('offline')) {
+          try {
+            const parts = statusData.stdout.split('}{');
+            if (parts.length >= 1) {
+              const status = JSON.parse(parts[0] + (parts.length > 1 ? '' : ''));
+              cyrusStatus = status.status || 'unknown';
+            }
+            if (parts.length >= 2) {
+              const version = JSON.parse('{' + parts[1]);
+              cyrusVersion = version.cyrus_cli_version || '-';
+            }
+          } catch (e) {
+            cyrusStatus = 'error';
+          }
+        }
+
+        document.getElementById('statStatus').textContent = cyrusStatus;
+        document.getElementById('statVersion').textContent = cyrusVersion;
+        document.getElementById('cyrusStatusBadge').innerHTML =
+          cyrusStatus === 'offline' ? '<span class="status-badge error">Offline</span>' :
+          cyrusStatus === 'idle' ? '<span class="status-badge ok">Ready</span>' :
+          cyrusStatus === 'busy' ? '<span class="status-badge warning">Busy</span>' :
+          '<span class="status-badge error">Error</span>';
+
+        // Update repo list
+        const repoList = document.getElementById('repoList');
+        if (repos.length === 0) {
+          repoList.innerHTML = '<li style="color: #666; padding: 12px;">No repositories configured</li>';
+        } else {
+          repoList.innerHTML = repos.map(r => \`
+            <li class="repo-item">
+              <div>
+                <div class="name">\${r.name}</div>
+                <div class="path">\${r.repositoryPath}</div>
+                <div class="workspace">Workspace: \${r.linearWorkspaceName || 'default'}</div>
+              </div>
+              <span class="status-badge \${r.isActive ? 'ok' : 'warning'}">\${r.isActive ? 'Active' : 'Inactive'}</span>
+            </li>
+          \`).join('');
+        }
       } catch (e) {
-        document.getElementById('status').innerHTML =
-          '<span class="status error">Error</span><pre>' + e.message + '</pre>';
+        document.getElementById('cyrusStatusBadge').innerHTML = '<span class="status-badge error">Error</span>';
       }
     }
 
-    async function loadConfig() {
+    async function bootstrap() {
+      document.getElementById('cyrusActionStatus').textContent = 'Bootstrapping...';
       try {
-        const res = await fetch('/api/config');
+        const res = await fetch('/api/bootstrap', { method: 'POST' });
         const data = await res.json();
-        document.getElementById('config').textContent = JSON.stringify(data, null, 2);
+        document.getElementById('cyrusActionStatus').textContent = data.success ? 'Done!' : 'Failed';
+        setTimeout(() => { refreshCyrusStatus(); refreshLogs(); }, 2000);
       } catch (e) {
-        document.getElementById('config').textContent = 'Error: ' + e.message;
+        document.getElementById('cyrusActionStatus').textContent = 'Error: ' + e.message;
+      }
+    }
+
+    // Container Status
+    async function refreshContainer() {
+      document.getElementById('containerStatus').innerHTML = 'Loading...';
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        const lines = (data.output || '').split('\\n').filter(l => l.includes('node') || l.includes('cyrus')).slice(0, 5);
+        document.getElementById('containerStatus').innerHTML =
+          '<span class="status-badge ok">Running</span>' +
+          '<pre style="margin-top: 8px; max-height: 100px;">' + (lines.join('\\n') || 'No processes') + '</pre>';
+      } catch (e) {
+        document.getElementById('containerStatus').innerHTML = '<span class="status-badge error">Error</span>';
       }
     }
 
     async function restartContainer() {
-      document.getElementById('restartStatus').textContent = 'Restarting...';
+      document.getElementById('containerActionStatus').textContent = 'Restarting...';
       try {
         const res = await fetch('/api/restart', { method: 'POST' });
         const data = await res.json();
-        document.getElementById('restartStatus').textContent =
-          data.success ? 'Restarted!' : 'Failed: ' + data.error;
-        if (data.success) setTimeout(refreshStatus, 2000);
+        document.getElementById('containerActionStatus').textContent = data.success ? 'Restarted!' : 'Failed';
+        setTimeout(refreshContainer, 2000);
       } catch (e) {
-        document.getElementById('restartStatus').textContent = 'Error: ' + e.message;
+        document.getElementById('containerActionStatus').textContent = 'Error';
       }
     }
 
-    async function triggerBackup() {
-      document.getElementById('backupStatus').textContent = 'Backing up...';
+    // Repositories
+    async function addRepo() {
+      const url = document.getElementById('repoUrl').value.trim();
+      const workspace = document.getElementById('repoWorkspace').value.trim();
+      if (!url) { alert('Enter a repository URL'); return; }
+
+      document.getElementById('addRepoStatus').innerHTML = '<span style="color: #666;">Adding repository...</span>';
       try {
-        const res = await fetch('/api/backup', { method: 'POST' });
+        const res = await fetch('/api/add-repo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, workspace: workspace || undefined })
+        });
         const data = await res.json();
-        document.getElementById('backupStatus').textContent =
-          data.success ? 'Backup complete: ' + new Date(data.timestamp).toLocaleString() : 'Failed: ' + data.error;
+        if (data.success) {
+          document.getElementById('addRepoStatus').innerHTML = '<span style="color: green;">Repository added!</span>';
+          document.getElementById('repoUrl').value = '';
+          document.getElementById('repoWorkspace').value = '';
+          // Save to R2 after adding
+          await fetch('/api/save', { method: 'POST' });
+          setTimeout(refreshCyrusStatus, 1000);
+        } else {
+          document.getElementById('addRepoStatus').innerHTML = '<span style="color: red;">Failed: ' + (data.stderr || data.error || 'Unknown error') + '</span>';
+        }
       } catch (e) {
-        document.getElementById('backupStatus').textContent = 'Error: ' + e.message;
+        document.getElementById('addRepoStatus').innerHTML = '<span style="color: red;">Error: ' + e.message + '</span>';
       }
     }
 
+    // Logs
+    async function refreshLogs() {
+      try {
+        const res = await fetch('/api/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'tail -30 /var/log/cyrus.log 2>/dev/null || echo "No logs available"' })
+        });
+        const data = await res.json();
+        document.getElementById('cyrusLogs').textContent = data.stdout || 'No logs';
+      } catch (e) {
+        document.getElementById('cyrusLogs').textContent = 'Error loading logs';
+      }
+    }
+
+    // Storage
+    async function saveConfig() {
+      document.getElementById('storageStatus').textContent = 'Saving...';
+      try {
+        const res = await fetch('/api/save', { method: 'POST' });
+        const data = await res.json();
+        document.getElementById('storageStatus').textContent = data.success ? 'Saved!' : 'Failed';
+      } catch (e) {
+        document.getElementById('storageStatus').textContent = 'Error';
+      }
+    }
+
+    async function restoreConfig() {
+      document.getElementById('storageStatus').textContent = 'Restoring...';
+      try {
+        const res = await fetch('/api/restore', { method: 'POST' });
+        const data = await res.json();
+        document.getElementById('storageStatus').textContent = data.success ? 'Restored!' : 'Failed';
+        setTimeout(refreshCyrusStatus, 1000);
+      } catch (e) {
+        document.getElementById('storageStatus').textContent = 'Error';
+      }
+    }
+
+    // Execute
     async function execCommand() {
       const cmd = document.getElementById('cmdInput').value;
       if (!cmd) return;
@@ -1021,8 +1223,9 @@ function handleAdminUI(request: Request, env: Env): Response {
     }
 
     // Initial load
-    refreshStatus();
-    loadConfig();
+    refreshCyrusStatus();
+    refreshContainer();
+    refreshLogs();
   </script>
 </body>
 </html>`;
