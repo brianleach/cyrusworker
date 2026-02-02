@@ -354,6 +354,14 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   const state = url.searchParams.get("state");
   const error = url.searchParams.get("error");
 
+  // Debug logging
+  console.log("OAuth callback received:", {
+    hasCode: !!code,
+    hasError: !!error,
+    error: error || undefined,
+    state: state || undefined
+  });
+
   // Handle OAuth errors
   if (error) {
     const errorDescription = url.searchParams.get("error_description") || "Unknown error";
@@ -451,16 +459,9 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
       JSON.stringify(tokenData, null, 2)
     );
 
-    // Initialize the sandbox with the new token
-    const sandboxId = `workspace-${orgInfo.id}`;
-    const sandbox = getSandbox(env.Sandbox, sandboxId);
-
-    // Write token to Cyrus config in sandbox
-    const tokenFile = `/root/.cyrus/tokens/${orgInfo.id}.json`;
-    await sandbox.exec(`mkdir -p /root/.cyrus/tokens`);
-    await sandbox.exec(`cat > ${tokenFile} << 'TOKEN_EOF'
-${JSON.stringify(tokenData, null, 2)}
-TOKEN_EOF`);
+    // NOTE: Skipping sandbox write here - it causes timeouts during OAuth flow
+    // Tokens are stored in R2 and can be synced to sandbox via /api/init
+    console.log("OAuth tokens stored in R2 for org:", orgInfo.id, orgInfo.name);
 
     // Return success page
     const html = `<!DOCTYPE html>

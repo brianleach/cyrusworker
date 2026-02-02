@@ -111,6 +111,23 @@ When working on this codebase, avoid adding logging that could capture issue tit
 - `handleOAuthCallback()` - TODO: needs token exchange implementation
 - `handleAdminUI()` - Returns inline HTML for admin dashboard
 
+## Setup: Linear OAuth Authorization
+
+After deploying the worker, you must authorize Cyrus with Linear:
+
+1. Construct the authorization URL:
+   ```
+   https://linear.app/oauth/authorize?client_id=YOUR_CLIENT_ID&redirect_uri=https://YOUR_WORKER.workers.dev/callback&response_type=code&scope=write,app:assignable,app:mentionable&actor=app
+   ```
+
+2. Visit the URL in your browser and authorize the app
+
+3. Linear will redirect to `/callback` which exchanges the code for tokens and stores them in R2
+
+4. You should see "Authorization Complete!" with your organization name
+
+**Note**: The `actor=app` parameter makes the OAuth token act as the Linear app (Cyrus) rather than your user account.
+
 ## Known TODOs
 
 - `verifyLinearSignature()` needs proper HMAC-SHA256 implementation (currently just checks signature exists)
