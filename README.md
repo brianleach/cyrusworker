@@ -24,6 +24,10 @@ Instead of running Cyrus on a local Mac mini or VPS:
 
 ## Quick Start
 
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/brianleach/cyrusworker)
+
+Or manually:
+
 ```bash
 # Clone and install
 git clone https://github.com/brianleach/cyrusworker.git
