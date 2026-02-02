@@ -143,6 +143,32 @@ async function saveConfigToR2(
     if (configResult.stdout && configResult.stdout.trim()) {
       await env.CYRUS_STORAGE.put("config/config.json", configResult.stdout);
       files.push("config.json");
+
+      // Also save repo clone URLs for each repository
+      try {
+        const config = JSON.parse(configResult.stdout) as { repositories?: Array<{ name: string; repositoryPath: string }> };
+        if (config.repositories) {
+          const repoUrls: Record<string, string> = {};
+          for (const repo of config.repositories) {
+            if (repo.repositoryPath && repo.name) {
+              const urlResult = await sandbox.exec(`git -C "${repo.repositoryPath}" remote get-url origin 2>/dev/null || echo ''`);
+              if (urlResult.stdout && urlResult.stdout.trim()) {
+                // Strip any embedded credentials from the URL before saving
+                let cleanUrl = urlResult.stdout.trim();
+                // Remove patterns like https://token:x-oauth-basic@github.com -> https://github.com
+                cleanUrl = cleanUrl.replace(/https:\/\/[^@]+@/, "https://");
+                repoUrls[repo.name] = cleanUrl;
+              }
+            }
+          }
+          if (Object.keys(repoUrls).length > 0) {
+            await env.CYRUS_STORAGE.put("config/repo-urls.json", JSON.stringify(repoUrls, null, 2));
+            files.push("repo-urls.json");
+          }
+        }
+      } catch (e) {
+        console.error("Failed to save repo URLs:", e);
+      }
     }
 
     // Save .env
@@ -170,6 +196,75 @@ async function saveConfigToR2(
     console.error("Failed to save to R2:", error);
     return { saved: false, files: [] };
   }
+}
+
+// Helper to clone missing repositories
+async function cloneMissingRepos(
+  sandbox: ReturnType<typeof getSandbox>,
+  env: Env,
+  ghToken: string
+): Promise<{ cloned: string[]; skipped: string[]; failed: string[] }> {
+  const cloned: string[] = [];
+  const skipped: string[] = [];
+  const failed: string[] = [];
+
+  try {
+    // Get repo URLs from R2
+    const repoUrlsObj = await env.CYRUS_STORAGE.get("config/repo-urls.json");
+    if (!repoUrlsObj) {
+      return { cloned, skipped, failed };
+    }
+    const repoUrls = JSON.parse(await repoUrlsObj.text()) as Record<string, string>;
+
+    // Get config to find repo paths
+    const configObj = await env.CYRUS_STORAGE.get("config/config.json");
+    if (!configObj) {
+      return { cloned, skipped, failed };
+    }
+    const config = JSON.parse(await configObj.text()) as { repositories?: Array<{ name: string; repositoryPath: string }> };
+
+    if (!config.repositories) {
+      return { cloned, skipped, failed };
+    }
+
+    // Check each repo and clone if missing
+    for (const repo of config.repositories) {
+      if (!repo.name || !repo.repositoryPath) continue;
+
+      // Check if repo directory exists and has .git
+      const checkResult = await sandbox.exec(`test -d "${repo.repositoryPath}/.git" && echo 'exists' || echo 'missing'`);
+
+      if (checkResult.stdout.includes("exists")) {
+        skipped.push(repo.name);
+        continue;
+      }
+
+      // Get clone URL
+      const cloneUrl = repoUrls[repo.name];
+      if (!cloneUrl) {
+        failed.push(`${repo.name} (no URL)`);
+        continue;
+      }
+
+      // Inject auth token into URL if it's a GitHub URL and doesn't already have auth
+      let authUrl = cloneUrl;
+      if (ghToken && cloneUrl.includes("github.com") && !cloneUrl.includes("@github.com")) {
+        authUrl = cloneUrl.replace("https://", `https://${ghToken}:x-oauth-basic@`);
+      }
+
+      // Clone the repo
+      const cloneResult = await sandbox.exec(`git clone "${authUrl}" "${repo.repositoryPath}" 2>&1`);
+      if (cloneResult.exitCode === 0) {
+        cloned.push(repo.name);
+      } else {
+        failed.push(`${repo.name} (${cloneResult.stderr || cloneResult.stdout || 'unknown error'})`);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to clone repos:", error);
+  }
+
+  return { cloned, skipped, failed };
 }
 
 export default {
@@ -283,9 +378,13 @@ async function handleApiRoutes(
 ): Promise<Response> {
   const sandbox = getSandbox(env.Sandbox, "primary");
 
-  // Full bootstrap: restore config, init, setup git, start Cyrus
+  // Full bootstrap: restore config, init, setup git, clone repos, start Cyrus
   if (url.pathname === "/api/bootstrap" && request.method === "POST") {
     const steps: string[] = [];
+
+    // Step 0: Kill any existing Cyrus to prevent it from overwriting config
+    await sandbox.exec("pkill -f 'cyrus start' 2>/dev/null || true");
+    await sandbox.exec("sleep 1");
 
     // Step 1: Restore config from R2
     const restoreResult = await restoreConfigFromR2(sandbox, env);
@@ -328,19 +427,25 @@ async function handleApiRoutes(
     }
     steps.push("git: configured");
 
-    // Step 4: Check if Cyrus is already running
-    const checkRunning = await sandbox.exec("pgrep -f 'cyrus start' && echo 'running' || echo 'not running'");
-    if (checkRunning.stdout.includes("running")) {
-      steps.push("cyrus: already running");
-    } else {
-      // Start Cyrus in background
-      await sandbox.exec("nohup cyrus start > /var/log/cyrus.log 2>&1 &");
-      await sandbox.exec("sleep 3");
-
-      // Verify it started
-      const checkStarted = await sandbox.exec("pgrep -f 'cyrus start' && echo 'started' || echo 'failed'");
-      steps.push(`cyrus: ${checkStarted.stdout.includes("started") ? "started" : "failed to start"}`);
+    // Step 4: Clone missing repositories
+    const cloneResult = await cloneMissingRepos(sandbox, env, ghToken);
+    if (cloneResult.cloned.length > 0) {
+      steps.push(`repos: cloned ${cloneResult.cloned.join(", ")}`);
     }
+    if (cloneResult.skipped.length > 0) {
+      steps.push(`repos: already exist ${cloneResult.skipped.join(", ")}`);
+    }
+    if (cloneResult.failed.length > 0) {
+      steps.push(`repos: failed ${cloneResult.failed.join(", ")}`);
+    }
+
+    // Step 5: Start Cyrus (we killed it at the start, so always restart)
+    await sandbox.exec("nohup cyrus start > /var/log/cyrus.log 2>&1 &");
+    await sandbox.exec("sleep 4");
+
+    // Verify it started
+    const checkStarted = await sandbox.exec("pgrep -f 'cyrus start' && echo 'started' || echo 'failed'");
+    steps.push(`cyrus: ${checkStarted.stdout.includes("started") ? "started" : "failed to start"}`);
 
     return Response.json({
       success: true,
