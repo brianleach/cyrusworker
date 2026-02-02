@@ -19,54 +19,73 @@ CyrusWorker runs the Cyrus AI agent (Claude Code-powered Linear agent) on Cloudf
 
 **Worker (src/index.ts)** - Single-file Cloudflare Worker handling all routes:
 - `/health` - Health check endpoint
-- `/webhook` - Receives Linear AgentSessionEvent webhooks (delegation, mentions, prompts)
+- `/webhook` - Receives Linear AgentSessionEvent webhooks, auto-bootstraps if needed, forwards to Cyrus
 - `/callback` - Linear OAuth callback for app installation
-- `/_admin/` - Admin UI for monitoring sandbox status, viewing config, triggering backups
-- `/api/*` - Internal API routes (status, config, backup, exec)
+- `/_admin/` - Admin UI for monitoring, managing repos, viewing logs
+- `/api/*` - Internal API routes (bootstrap, status, config, repos, storage)
 
 **Sandbox Container (Dockerfile)** - Runs in Cloudflare Containers with:
 - Node.js 22, git, GitHub CLI
 - Claude Code CLI (`@anthropic-ai/claude-code`)
-- Cyrus AI agent (`cyrus-ai`)
-- Working directories: `/data/repos`, `/data/worktrees`, `/data/backup`
+- Cyrus from [ceedaragents/cyrus](https://github.com/ceedaragents/cyrus) (pnpm monorepo)
+- Working directories: `/root/.cyrus/repos`, `/root/.cyrus/worktrees`
 
-**Container Startup (start-cyrus.sh)** - Initializes container with:
-- Git identity from env vars
-- GitHub CLI auth via `GH_TOKEN`
-- SSH key setup for private repos
-- Cyrus config generation from template
+**Cyrus EdgeWorker** - Runs inside the container on port 3456:
+- Receives forwarded webhooks from the Worker
+- Processes issues using Claude Code
+- Posts responses back to Linear
 
 ### Data Flow
 
 1. User delegates issue to Cyrus or @mentions it in Linear
 2. Linear sends AgentSessionEvent webhook to Worker
 3. Worker verifies signature using `LINEAR_WEBHOOK_SECRET`
-4. Worker gets sandbox instance for the organization
-5. Worker executes `cyrus process-issue` (for new sessions) or `cyrus process-prompt` (for follow-ups) in sandbox
-6. Sandbox container runs Claude Code to process the issue
-7. Config state can be backed up to R2 bucket (`CYRUS_STORAGE`)
+4. Worker checks if Cyrus is running (health check to port 3456)
+5. If Cyrus is not running, Worker auto-bootstraps (restore from R2, clone repos, start Cyrus)
+6. Worker forwards webhook to Cyrus EdgeWorker at `localhost:3456/webhook`
+7. Cyrus processes the issue using Claude Code and responds in Linear
 
 ### API Routes
 
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/health` | GET | Returns "OK" - health check |
-| `/webhook` | POST | Linear AgentSessionEvent webhook receiver |
+| `/webhook` | POST | Linear AgentSessionEvent webhook receiver (auto-bootstraps if needed) |
 | `/callback` | GET | Linear OAuth callback |
+| `/api/bootstrap` | POST | Full bootstrap: restore config, clone repos, start Cyrus |
 | `/api/status` | GET | Sandbox process and disk status |
 | `/api/config` | GET | Current Cyrus config JSON |
 | `/api/init` | POST | Initialize Cyrus .env file from Worker secrets |
-| `/api/auth` | POST | Start Cyrus self-auth flow (returns auth URL) |
+| `/api/start` | POST | Start Cyrus EdgeWorker |
 | `/api/add-repo` | POST | Add repository to Cyrus (JSON body: `{url: string, workspace?: string}`) |
+| `/api/restore` | POST | Restore config/tokens from R2 to sandbox |
+| `/api/save` | POST | Save config/tokens from sandbox to R2 |
 | `/api/restart` | POST | Restart container processes |
-| `/api/backup` | POST | Backup config to R2 |
+| `/api/backup` | POST | Backup full ~/.cyrus to R2 |
 | `/api/exec` | POST | Execute command in sandbox (JSON body: `{command: string}`) |
 | `/_admin/` | GET | Admin UI (HTML) |
 
+### R2 Storage Structure
+
+Config and state are persisted to R2 bucket (`CYRUS_STORAGE`):
+
+```
+config/
+  config.json      # Cyrus configuration with repositories
+  .env             # Environment variables
+  repo-urls.json   # Clone URLs for auto-restore
+tokens/
+  {orgId}.json     # OAuth tokens by organization
+  latest.json      # Most recent OAuth token
+backups/
+  latest.tar.gz    # Full ~/.cyrus backup
+  {timestamp}.tar.gz
+```
+
 ### Bindings
 
-- `Sandbox` - Durable Object namespace for sandbox containers (per-org isolation via `workspace-{organizationId}`)
-- `CYRUS_STORAGE` - R2 bucket for config backups
+- `Sandbox` - Durable Object namespace for sandbox containers
+- `CYRUS_STORAGE` - R2 bucket for config persistence
 
 ## Secrets
 
@@ -92,77 +111,87 @@ No Cloudflare Zero Trust - the webhook signature verification and API keys provi
 
 Linear issues may contain PHI/PII. The following measures minimize exposure:
 
-- **Issue data passed via temp file** - not command args (avoids `ps aux` exposure)
-- **Webhook response excludes stdout/stderr** - only returns success status
+- **Webhook forwarding** - Issue data forwarded to Cyrus, not logged by Worker
 - **`/api/status` uses minimal `ps` output** - no command arguments shown
 - **No `console.log` of issue content** - only webhook type/action logged
 
 **Remaining exposure points (by design):**
-- `/api/exec` returns command output - required for Cyrus to function
-- `/api/backup` may include cached issue data in ~/.cyrus
-- Admin UI displays exec output
+- `/api/exec` returns command output - required for debugging
+- Admin UI displays logs and exec output
+- R2 backups may include cached issue data in ~/.cyrus
 
 When working on this codebase, avoid adding logging that could capture issue titles, descriptions, or other PHI/PII.
 
 ## Key Functions
 
-- `handleAgentSessionWebhook()` - Handles Linear AgentSessionEvent webhooks (created/prompted actions)
-- `verifyLinearSignature()` - TODO: needs proper HMAC-SHA256 implementation
-- `handleOAuthCallback()` - TODO: needs token exchange implementation
-- `handleAdminUI()` - Returns inline HTML for admin dashboard
+- `runBootstrap()` - Full bootstrap sequence: kill Cyrus, restore from R2, init env, clone repos, start Cyrus
+- `handleAgentSessionWebhook()` - Receives webhooks, auto-bootstraps if needed, forwards to Cyrus
+- `restoreConfigFromR2()` - Restores config.json, .env, tokens from R2 to sandbox
+- `saveConfigToR2()` - Saves config.json, .env, tokens, repo URLs from sandbox to R2
+- `cloneMissingRepos()` - Clones repositories that exist in config but not on disk
+- `handleOAuthCallback()` - Exchanges OAuth code for tokens, stores in R2
+- `handleAdminUI()` - Returns admin dashboard HTML
 
 ## Setup: Linear OAuth Authorization
 
-After deploying the worker, you must authorize Cyrus with Linear:
+After deploying the worker:
 
-1. Construct the authorization URL:
+1. Visit the authorization URL:
    ```
    https://linear.app/oauth/authorize?client_id=YOUR_CLIENT_ID&redirect_uri=https://YOUR_WORKER.workers.dev/callback&response_type=code&scope=write,app:assignable,app:mentionable&actor=app
    ```
 
-2. Visit the URL in your browser and authorize the app
+2. Authorize the app for your workspace
 
-3. Linear will redirect to `/callback` which exchanges the code for tokens and stores them in R2
+3. Linear redirects to `/callback` which exchanges the code for tokens and stores them in R2
 
 4. You should see "Authorization Complete!" with your organization name
 
+5. Add a repository via Admin UI or API:
+   ```bash
+   curl -X POST https://your-worker.workers.dev/api/add-repo \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://github.com/org/repo"}'
+   ```
+
 **Note**: The `actor=app` parameter makes the OAuth token act as the Linear app (Cyrus) rather than your user account.
 
-## Known Issues
+## Auto-Bootstrap
 
-**Container State Reset**: The Cloudflare sandbox container frequently resets/restarts, losing:
-- `/root/.cyrus/.env`
-- `/root/.cyrus/config.json`
-- `/root/.cyrus/tokens/`
+The webhook handler automatically bootstraps if Cyrus isn't running:
 
-**Workaround**: Run init sequence quickly before container goes to sleep:
-1. `POST /api/init` - creates .env with secrets
-2. Create config.json with repo + token inline (Cyrus expects tokens in repositories array, not tokens dir)
-3. `POST /api/sync-tokens` - copies OAuth token from R2
+1. Health check to `localhost:3456/status`
+2. If not responding, run full bootstrap:
+   - Kill any stuck Cyrus processes
+   - Restore config from R2
+   - Create .env with secrets
+   - Configure git credentials
+   - Clone missing repositories
+   - Start Cyrus EdgeWorker
+3. Forward webhook to Cyrus
 
-**Cyrus Token Format**: Cyrus expects Linear tokens in `config.json` repositories, not in `tokens/` directory:
-```json
-{
-  "repositories": [{
-    "url": "...",
-    "linearWorkspaceId": "...",
-    "linearWorkspaceName": "...",
-    "linearToken": "lin_oauth_..."
-  }]
-}
-```
+This means cold starts are handled automatically - the first webhook after a container reset triggers bootstrap.
+
+## Cyrus Source
+
+**IMPORTANT**: Cyrus is from https://github.com/ceedaragents/cyrus
+
+- It's a **pnpm monorepo** - must use `pnpm install && pnpm build`
+- CLI is at `apps/cli` with binary at `dist/src/app.js`
+- Runs as an EdgeWorker server to receive webhooks and process issues via Claude Code
+- Config format expects Linear tokens embedded in repositories array:
+  ```json
+  {
+    "repositories": [{
+      "name": "repo-name",
+      "repositoryPath": "/root/.cyrus/repos/repo-name",
+      "linearWorkspaceId": "...",
+      "linearWorkspaceName": "...",
+      "linearToken": "lin_oauth_..."
+    }]
+  }
+  ```
 
 ## Known TODOs
 
 - `verifyLinearSignature()` needs proper HMAC-SHA256 implementation (currently just checks signature exists)
-- Persist sandbox state to R2 and restore on container start
-- Consider using Cloudflare Durable Objects storage for config persistence
-
-## Cyrus Source
-
-**IMPORTANT**: Cyrus is the `cyrus-ai` package from https://github.com/ceedaragents/cyrus
-
-- It's a **pnpm monorepo** - must use `pnpm install && pnpm build`
-- CLI is at `apps/cli` with binary at `dist/src/app.js`
-- Runs as a server to receive Linear webhooks and process issues via Claude Code
-- Do NOT confuse with any other project - this IS the Claude Code Linear agent

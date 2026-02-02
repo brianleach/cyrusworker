@@ -1,8 +1,6 @@
 # CyrusWorker
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/brianleach/cyrusworker)
-
-Run [Cyrus](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using Sandbox SDK.
+Run [Cyrus](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
 
 Inspired by [Moltworker](https://github.com/cloudflare/moltworker).
 
@@ -11,9 +9,9 @@ Inspired by [Moltworker](https://github.com/cloudflare/moltworker).
 Instead of running Cyrus on a local Mac mini or VPS:
 
 - **No hardware required** - Runs in Cloudflare Sandbox containers
-- **Always on** - No need to keep a local machine running
+- **Always on** - Auto-bootstraps on first webhook after cold start
 - **Global edge** - Low latency webhook processing worldwide
-- **Persistent storage** - R2 backup of config and state
+- **Persistent storage** - R2 backup of config, tokens, and repo URLs
 - **Secure** - Webhook signature verification protects endpoints
 - **PHI-conscious** - Minimizes logging of Linear issue content (see [CLAUDE.md](./CLAUDE.md#hipaaphi-considerations))
 
@@ -27,7 +25,9 @@ Instead of running Cyrus on a local Mac mini or VPS:
 ## Quick Start
 
 ```bash
-# Install dependencies
+# Clone and install
+git clone https://github.com/brianleach/cyrusworker.git
+cd cyrusworker
 npm install
 
 # Deploy (requires Docker running)
@@ -75,23 +75,19 @@ npx wrangler secret put GIT_USER_NAME
 npx wrangler secret put GIT_USER_EMAIL
 ```
 
-### Step 3: Initialize Cyrus Environment
+### Step 3: Authorize Cyrus with Linear
 
-After setting secrets, initialize the Cyrus environment in the sandbox:
+Visit the authorization URL (replace with your values):
 
-```bash
-curl -X POST https://your-worker.workers.dev/api/init
+```
+https://linear.app/oauth/authorize?client_id=YOUR_CLIENT_ID&redirect_uri=https://YOUR_WORKER.workers.dev/callback&response_type=code&scope=write,app:assignable,app:mentionable&actor=app
 ```
 
-### Step 4: Authorize Cyrus with Linear
+You should see "Authorization Complete!" with your organization name.
 
-```bash
-curl -X POST https://your-worker.workers.dev/api/auth
-```
+### Step 4: Add a Repository
 
-This returns an authorization URL. Open it in your browser and authorize Cyrus for your workspace.
-
-### Step 5: Add a Repository
+Open the Admin UI at `https://your-worker.workers.dev/_admin/` and use the "Add Repository" form, or via API:
 
 ```bash
 curl -X POST https://your-worker.workers.dev/api/add-repo \
@@ -99,21 +95,18 @@ curl -X POST https://your-worker.workers.dev/api/add-repo \
   -d '{"url": "https://github.com/your-org/your-repo.git"}'
 ```
 
-Optionally specify a Linear workspace name:
+### Step 5: Delegate an Issue
 
-```bash
-curl -X POST https://your-worker.workers.dev/api/add-repo \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://github.com/your-org/your-repo.git", "workspace": "My Workspace"}'
-```
+In Linear, open any issue and click **Delegate to... → Cyrus**. Cyrus will process the issue using Claude Code.
 
 ## How It Works
 
 1. User **delegates** an issue to Cyrus or **@mentions** it in a comment
 2. Linear sends an `AgentSessionEvent` webhook to your worker
-3. Worker verifies the signature and dispatches to the sandbox
-4. Cyrus processes the issue using Claude Code
-5. Results are posted back to Linear as agent activities
+3. Worker checks if Cyrus is running; if not, **auto-bootstraps** (restores config from R2, clones repos, starts Cyrus)
+4. Worker forwards the webhook to Cyrus EdgeWorker (port 3456)
+5. Cyrus processes the issue using Claude Code
+6. Results are posted back to Linear
 
 **Note**: Cyrus appears as a delegatable agent in Linear's "Delegate to..." menu, not as a regular user in the assignee list.
 
@@ -122,25 +115,30 @@ curl -X POST https://your-worker.workers.dev/api/add-repo \
 Access at: `https://your-worker.workers.dev/_admin/`
 
 Features:
-- View sandbox process status
-- View current Cyrus config
-- Execute commands in the sandbox
-- Backup config to R2
+- **Cyrus Status** - View status (idle/busy/offline), version, repo count
+- **Repositories** - List configured repos, add new repos
+- **Logs** - View Cyrus EdgeWorker logs
+- **Storage** - Save/restore config to R2
+- **Bootstrap** - Manually trigger bootstrap
+- **Execute** - Run commands in the sandbox
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/webhook` | POST | Linear AgentSessionEvent receiver |
+| `/webhook` | POST | Linear AgentSessionEvent receiver (auto-bootstraps) |
 | `/callback` | GET | Linear OAuth callback |
+| `/api/bootstrap` | POST | Full bootstrap: restore, clone repos, start Cyrus |
 | `/api/status` | GET | Sandbox process and disk status |
 | `/api/config` | GET | Current Cyrus config |
 | `/api/init` | POST | Initialize Cyrus .env from Worker secrets |
-| `/api/auth` | POST | Start Cyrus self-auth flow (returns auth URL) |
+| `/api/start` | POST | Start Cyrus EdgeWorker |
 | `/api/add-repo` | POST | Add repository (`{url, workspace?}`) |
+| `/api/restore` | POST | Restore config from R2 |
+| `/api/save` | POST | Save config to R2 |
 | `/api/exec` | POST | Execute command in sandbox |
-| `/api/backup` | POST | Backup config to R2 |
+| `/api/backup` | POST | Backup full ~/.cyrus to R2 |
 | `/_admin/` | GET | Admin UI |
 
 ## Secrets Reference
@@ -217,15 +215,24 @@ npm run dev
 
 ## Architecture
 
-See [CLAUDE.md](./CLAUDE.md) for architecture details.
+See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
 
 ## Troubleshooting
 
 ### Cyrus doesn't appear in Linear's "Delegate to..." menu
 
 - Verify **Agent session events** is enabled in your OAuth Application
-- Ensure you completed `cyrus self-auth` authorization flow
+- Ensure you completed the OAuth authorization flow
 - Check that the webhook URL is correct and responding
+
+### First webhook fails / "did not respond"
+
+The container may have been cold. CyrusWorker now auto-bootstraps on webhook, but the first request after a cold start may timeout. Try delegating again - it should work on the second attempt.
+
+You can also manually bootstrap via Admin UI or:
+```bash
+curl -X POST https://your-worker.workers.dev/api/bootstrap
+```
 
 ### Webhooks aren't being received
 
@@ -236,8 +243,13 @@ See [CLAUDE.md](./CLAUDE.md) for architecture details.
 ### Authorization fails
 
 - Ensure `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are set correctly
-- Run `/api/init` to regenerate the .env file
 - Check the callback URL matches: `https://your-worker.workers.dev/callback`
+
+### Repository cloning fails
+
+- Verify `GH_TOKEN` has access to the repository
+- Check the repository URL is correct (HTTPS format)
+- View logs in Admin UI for detailed error messages
 
 ## License
 
