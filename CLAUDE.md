@@ -128,9 +128,35 @@ After deploying the worker, you must authorize Cyrus with Linear:
 
 **Note**: The `actor=app` parameter makes the OAuth token act as the Linear app (Cyrus) rather than your user account.
 
+## Known Issues
+
+**Container State Reset**: The Cloudflare sandbox container frequently resets/restarts, losing:
+- `/root/.cyrus/.env`
+- `/root/.cyrus/config.json`
+- `/root/.cyrus/tokens/`
+
+**Workaround**: Run init sequence quickly before container goes to sleep:
+1. `POST /api/init` - creates .env with secrets
+2. Create config.json with repo + token inline (Cyrus expects tokens in repositories array, not tokens dir)
+3. `POST /api/sync-tokens` - copies OAuth token from R2
+
+**Cyrus Token Format**: Cyrus expects Linear tokens in `config.json` repositories, not in `tokens/` directory:
+```json
+{
+  "repositories": [{
+    "url": "...",
+    "linearWorkspaceId": "...",
+    "linearWorkspaceName": "...",
+    "linearToken": "lin_oauth_..."
+  }]
+}
+```
+
 ## Known TODOs
 
 - `verifyLinearSignature()` needs proper HMAC-SHA256 implementation (currently just checks signature exists)
+- Persist sandbox state to R2 and restore on container start
+- Consider using Cloudflare Durable Objects storage for config persistence
 
 ## Cyrus Source
 
