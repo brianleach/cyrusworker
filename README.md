@@ -1,12 +1,12 @@
 # CyrusWorker
 
-Run [Cyrus](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
+Run [Cyrus Community Edition](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
 
 Inspired by [Moltworker](https://github.com/cloudflare/moltworker).
 
 ## Why CyrusWorker?
 
-Instead of running Cyrus on a local Mac mini or VPS:
+Instead of running Cyrus Community Edition on a local Mac mini or VPS:
 
 - **No hardware required** - Runs in Cloudflare Sandbox containers
 - **Always on** - Auto-bootstraps on first webhook after cold start

@@ -13,7 +13,7 @@ npm run tail         # Tail production logs
 
 ## Architecture
 
-CyrusWorker runs the Cyrus AI agent (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
+CyrusWorker runs Cyrus Community Edition (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
 
 ### Components
 
@@ -27,7 +27,7 @@ CyrusWorker runs the Cyrus AI agent (Claude Code-powered Linear agent) on Cloudf
 **Sandbox Container (Dockerfile)** - Runs in Cloudflare Containers with:
 - Node.js 22, git, GitHub CLI
 - Claude Code CLI (`@anthropic-ai/claude-code`)
-- Cyrus from [ceedaragents/cyrus](https://github.com/ceedaragents/cyrus) (pnpm monorepo)
+- Cyrus Community Edition from [ceedaragents/cyrus](https://github.com/ceedaragents/cyrus) (pnpm monorepo)
 - Working directories: `/root/.cyrus/repos`, `/root/.cyrus/worktrees`
 
 **Cyrus EdgeWorker** - Runs inside the container on port 3456:
