@@ -46,16 +46,16 @@ if [ ! -f "/root/.cyrus/config.json" ]; then
     fi
 fi
 
-# Anthropic API key for Claude Code
-if [ -n "$ANTHROPIC_API_KEY" ]; then
-    export ANTHROPIC_API_KEY
-    echo "Anthropic API key configured"
-fi
-
 echo "=== Container Ready ==="
 echo "Cyrus config: /root/.cyrus/config.json"
 echo "Repos dir: /data/repos"
 echo "Worktrees dir: /data/worktrees"
+
+# Check for .env file
+if [ ! -f "/root/.cyrus/.env" ]; then
+    echo "ERROR: /root/.cyrus/.env not found. Run /api/init first."
+    exit 1
+fi
 
 # Start Cyrus server
 echo "Starting Cyrus..."
