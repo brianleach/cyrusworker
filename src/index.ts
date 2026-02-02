@@ -12,6 +12,7 @@ interface Env {
   GH_TOKEN?: string;
   GIT_USER_NAME?: string;
   GIT_USER_EMAIL?: string;
+  GATEWAY_TOKEN?: string;
 }
 
 interface AgentSessionWebhookPayload {
@@ -287,9 +288,16 @@ export default {
         return await handleOAuthCallback(request, env);
       }
 
-      // Admin UI
+      // Admin UI (protected by gateway token)
       if (url.pathname === "/_admin" || url.pathname === "/_admin/") {
-        return handleAdminUI(request, env);
+        // Verify gateway token
+        if (env.GATEWAY_TOKEN) {
+          const token = url.searchParams.get("token");
+          if (token !== env.GATEWAY_TOKEN) {
+            return new Response("Unauthorized - invalid or missing token", { status: 401 });
+          }
+        }
+        return handleAdminUI(request, env, url);
       }
 
       // API routes
@@ -861,7 +869,7 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   }
 }
 
-function handleAdminUI(request: Request, env: Env): Response {
+function handleAdminUI(request: Request, env: Env, url: URL): Response {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>

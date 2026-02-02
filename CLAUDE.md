@@ -96,13 +96,15 @@ Set via `npx wrangler secret put <NAME>`:
 - `LINEAR_CLIENT_ID` - Linear OAuth Application client ID
 - `LINEAR_CLIENT_SECRET` - Linear OAuth Application client secret
 - `LINEAR_WEBHOOK_SECRET` - Linear OAuth Application webhook signing secret
+- `GATEWAY_TOKEN` (recommended) - Token to protect Admin UI (`/_admin/?token=...`)
 - `GIT_SSH_PRIVATE_KEY` (optional) - SSH key for private repos
 
 ## Security Model
 
 Authentication is handled by:
 - **Webhook endpoint**: Linear signature verification (HMAC-SHA256 with `LINEAR_WEBHOOK_SECRET`)
-- **API/Admin routes**: Publicly accessible but require sandbox to be running to do anything meaningful
+- **Admin UI**: Protected by `GATEWAY_TOKEN` query parameter (access via `/_admin/?token=...`)
+- **API routes**: Publicly accessible but require sandbox to be running to do anything meaningful
 - **External APIs**: Protected by API keys (Anthropic, GitHub)
 
 No Cloudflare Zero Trust - the webhook signature verification and API keys provide sufficient protection.

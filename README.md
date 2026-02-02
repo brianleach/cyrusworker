@@ -112,7 +112,20 @@ In Linear, open any issue and click **Delegate to... → Cyrus**. Cyrus will pro
 
 ## Admin UI
 
-Access at: `https://your-worker.workers.dev/_admin/`
+The Admin UI is protected by a gateway token. First, generate and set the token:
+
+```bash
+# Generate and set a gateway token
+export GATEWAY_TOKEN=$(openssl rand -hex 32)
+echo "Your gateway token: $GATEWAY_TOKEN"
+echo "$GATEWAY_TOKEN" | npx wrangler secret put GATEWAY_TOKEN
+```
+
+Then access the Admin UI with your token:
+
+```
+https://your-worker.workers.dev/_admin/?token=YOUR_GATEWAY_TOKEN
+```
 
 Features:
 - **Cyrus Status** - View status (idle/busy/offline), version, repo count
@@ -152,6 +165,7 @@ Features:
 | `GH_TOKEN` | Yes | GitHub PAT for PR creation |
 | `GIT_USER_NAME` | Yes | Git commit author name |
 | `GIT_USER_EMAIL` | Yes | Git commit author email |
+| `GATEWAY_TOKEN` | Recommended | Token to protect Admin UI access |
 | `GIT_SSH_PRIVATE_KEY` | No | SSH private key for private repos |
 
 ### Where to Get Each Secret
