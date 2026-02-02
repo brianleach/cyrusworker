@@ -45,6 +45,133 @@ interface AgentSessionWebhookPayload {
   };
 }
 
+// Get OAuth token data from R2
+async function getOAuthTokenFromR2(env: Env): Promise<{
+  access_token: string;
+  organization_id: string;
+  organization_name: string;
+} | null> {
+  try {
+    const tokenObj = await env.CYRUS_STORAGE.get("tokens/latest.json");
+    if (!tokenObj) return null;
+
+    return JSON.parse(await tokenObj.text()) as {
+      access_token: string;
+      organization_id: string;
+      organization_name: string;
+    };
+  } catch (error) {
+    console.error("Failed to get token from R2:", error);
+    return null;
+  }
+}
+
+// Build Cyrus config.json - returns empty config (repos added via cyrus self-add-repo)
+// Note: We don't create incomplete repository entries that lack name/repositoryPath
+// Those cause Cyrus EdgeWorker to fail with "Cannot read properties of undefined"
+async function buildCyrusConfigFromTokens(_env: Env): Promise<{ config: object } | null> {
+  // Return empty repositories array - actual repos get added via cyrus self-add-repo
+  // which properly sets all required fields (name, repositoryPath, linearToken, etc.)
+  return { config: { repositories: [] } };
+}
+
+// Helper to restore Cyrus config from R2 to sandbox
+async function restoreConfigFromR2(
+  sandbox: ReturnType<typeof getSandbox>,
+  env: Env
+): Promise<{ restored: boolean; files: string[] }> {
+  const files: string[] = [];
+
+  try {
+    // First try to restore saved config.json
+    const configObj = await env.CYRUS_STORAGE.get("config/config.json");
+    if (configObj) {
+      const config = await configObj.text();
+      const b64 = btoa(config);
+      await sandbox.exec(`mkdir -p /root/.cyrus && echo ${b64} | base64 -d > /root/.cyrus/config.json`);
+      files.push("config.json");
+    } else {
+      // No saved config - build from OAuth tokens
+      const result = await buildCyrusConfigFromTokens(env);
+      if (result) {
+        const configJson = JSON.stringify(result.config, null, 2);
+        const b64 = btoa(configJson);
+        await sandbox.exec(`mkdir -p /root/.cyrus && echo ${b64} | base64 -d > /root/.cyrus/config.json`);
+        files.push("config.json (built from tokens)");
+      }
+    }
+
+    // Restore .env
+    const envObj = await env.CYRUS_STORAGE.get("config/.env");
+    if (envObj) {
+      const envContent = await envObj.text();
+      const b64 = btoa(envContent);
+      await sandbox.exec(`mkdir -p /root/.cyrus && echo ${b64} | base64 -d > /root/.cyrus/.env`);
+      files.push(".env");
+    }
+
+    // Restore tokens (for backup purposes, though Cyrus uses config.json)
+    const tokenList = await env.CYRUS_STORAGE.list({ prefix: "tokens/" });
+    for (const obj of tokenList.objects) {
+      const tokenObj = await env.CYRUS_STORAGE.get(obj.key);
+      if (tokenObj) {
+        const tokenContent = await tokenObj.text();
+        const filename = obj.key.replace("tokens/", "");
+        const b64 = btoa(tokenContent);
+        await sandbox.exec(`mkdir -p /root/.cyrus/tokens && echo ${b64} | base64 -d > /root/.cyrus/tokens/${filename}`);
+        files.push(`tokens/${filename}`);
+      }
+    }
+
+    return { restored: files.length > 0, files };
+  } catch (error) {
+    console.error("Failed to restore from R2:", error);
+    return { restored: false, files: [] };
+  }
+}
+
+// Helper to save Cyrus config to R2
+async function saveConfigToR2(
+  sandbox: ReturnType<typeof getSandbox>,
+  env: Env
+): Promise<{ saved: boolean; files: string[] }> {
+  const files: string[] = [];
+
+  try {
+    // Save config.json
+    const configResult = await sandbox.exec("cat /root/.cyrus/config.json 2>/dev/null || echo ''");
+    if (configResult.stdout && configResult.stdout.trim()) {
+      await env.CYRUS_STORAGE.put("config/config.json", configResult.stdout);
+      files.push("config.json");
+    }
+
+    // Save .env
+    const envResult = await sandbox.exec("cat /root/.cyrus/.env 2>/dev/null || echo ''");
+    if (envResult.stdout && envResult.stdout.trim()) {
+      await env.CYRUS_STORAGE.put("config/.env", envResult.stdout);
+      files.push(".env");
+    }
+
+    // Save tokens
+    const tokensResult = await sandbox.exec("ls /root/.cyrus/tokens/ 2>/dev/null || echo ''");
+    if (tokensResult.stdout && tokensResult.stdout.trim()) {
+      const tokenFiles = tokensResult.stdout.trim().split("\n").filter(f => f);
+      for (const tokenFile of tokenFiles) {
+        const tokenContent = await sandbox.exec(`cat /root/.cyrus/tokens/${tokenFile}`);
+        if (tokenContent.stdout) {
+          await env.CYRUS_STORAGE.put(`tokens/${tokenFile}`, tokenContent.stdout);
+          files.push(`tokens/${tokenFile}`);
+        }
+      }
+    }
+
+    return { saved: files.length > 0, files };
+  } catch (error) {
+    console.error("Failed to save to R2:", error);
+    return { saved: false, files: [] };
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -108,64 +235,45 @@ async function handleAgentSessionWebhook(
   const payload: AgentSessionWebhookPayload = JSON.parse(body);
   console.log("Linear webhook:", payload.type, payload.action);
 
-  // Only process AgentSessionEvent webhooks
-  if (payload.type !== "AgentSessionEvent") {
-    return Response.json({ status: "ignored", reason: "not an agent session event" });
-  }
-
-  // Must respond within 5 seconds, so return quickly and process async
-  const agentSession = payload.agentSession;
-  if (!agentSession) {
-    return Response.json({ status: "ignored", reason: "no agent session" });
-  }
-
-  // Get sandbox instance (using "primary" for single-tenant setup)
-  // TODO: For multi-tenant, use `workspace-${payload.organizationId}`
+  // Get sandbox instance
   const sandbox = getSandbox(env.Sandbox, "primary");
 
-  // Write webhook payload to temp file to avoid exposing PHI/PII in command args
-  const sessionId = agentSession.id || "unknown";
-  const tempFile = `/tmp/session-${sessionId}.json`;
-
-  // Include full payload for Cyrus to process
-  const sessionData = JSON.stringify({
-    action: payload.action,
-    sessionId: agentSession.id,
-    issue: agentSession.issue,
-    comment: agentSession.comment,
-    promptContext: payload.promptContext,
-    userMessage: payload.agentActivity?.body, // For "prompted" actions
-  });
-
-  await sandbox.exec(`cat > ${tempFile} << 'SESSION_EOF'
-${sessionData}
-SESSION_EOF`);
-
-  // Handle based on action type
-  if (payload.action === "created") {
-    // New delegation or mention - start processing
-    const result = await sandbox.exec(
-      `cyrus process-issue "$(cat ${tempFile})" && rm -f ${tempFile}`
+  // Forward webhook to Cyrus running on port 3456 inside the container
+  // Cyrus expects webhooks at /webhook endpoint
+  try {
+    const forwardResult = await sandbox.exec(
+      `curl -s -X POST http://localhost:3456/webhook -H "Content-Type: application/json" -H "linear-signature: ${request.headers.get("linear-signature") || ""}" -d '${body.replace(/'/g, "'\\''")}'`
     );
+
+    console.log("Forwarded to Cyrus, response:", forwardResult.stdout?.substring(0, 200));
+
+    if (forwardResult.success && forwardResult.stdout) {
+      try {
+        const cyrusResponse = JSON.parse(forwardResult.stdout);
+        return Response.json({
+          status: "forwarded",
+          cyrusResponse,
+        });
+      } catch {
+        // Cyrus might return non-JSON
+        return Response.json({
+          status: "forwarded",
+          cyrusResponse: forwardResult.stdout,
+        });
+      }
+    }
+
     return Response.json({
-      status: "processed",
-      sessionId: agentSession.id,
-      issue: agentSession.issue?.identifier,
-      success: result.success,
+      status: "forward_failed",
+      error: forwardResult.stderr || "Unknown error",
     });
-  } else if (payload.action === "prompted") {
-    // Follow-up message from user
-    const result = await sandbox.exec(
-      `cyrus process-prompt "$(cat ${tempFile})" && rm -f ${tempFile}`
-    );
+  } catch (error) {
+    console.error("Failed to forward webhook:", error);
     return Response.json({
-      status: "prompted",
-      sessionId: agentSession.id,
-      success: result.success,
-    });
+      status: "error",
+      error: String(error),
+    }, { status: 500 });
   }
-
-  return Response.json({ status: "ignored", reason: "unknown action" });
 }
 
 async function handleApiRoutes(
@@ -174,6 +282,92 @@ async function handleApiRoutes(
   url: URL
 ): Promise<Response> {
   const sandbox = getSandbox(env.Sandbox, "primary");
+
+  // Full bootstrap: restore config, init, setup git, start Cyrus
+  if (url.pathname === "/api/bootstrap" && request.method === "POST") {
+    const steps: string[] = [];
+
+    // Step 1: Restore config from R2
+    const restoreResult = await restoreConfigFromR2(sandbox, env);
+    steps.push(`restore: ${restoreResult.restored ? "restored " + restoreResult.files.length + " files" : "no files"}`);
+
+    // Step 2: Create .env file
+    const baseUrl = url.origin;
+    const gitName = env.GIT_USER_NAME || "Cyrus";
+    const gitEmail = env.GIT_USER_EMAIL || "cyrus@example.com";
+    const ghToken = env.GH_TOKEN || "";
+
+    const envContent = [
+      "# Cyrus environment (generated by CyrusWorker)",
+      "LINEAR_DIRECT_WEBHOOKS=true",
+      `CYRUS_BASE_URL=${baseUrl}`,
+      "CYRUS_SERVER_PORT=3456",
+      "CYRUS_HOST_EXTERNAL=true",
+      "",
+      "# Linear OAuth",
+      `LINEAR_CLIENT_ID=${env.LINEAR_CLIENT_ID || ""}`,
+      `LINEAR_CLIENT_SECRET=${env.LINEAR_CLIENT_SECRET || ""}`,
+      `LINEAR_WEBHOOK_SECRET=${env.LINEAR_WEBHOOK_SECRET || ""}`,
+      "",
+      "# Claude Code",
+      `ANTHROPIC_API_KEY=${env.ANTHROPIC_API_KEY || ""}`,
+      "",
+      "# GitHub",
+      `GH_TOKEN=${ghToken}`,
+      `GIT_USER_NAME=${gitName}`,
+      `GIT_USER_EMAIL=${gitEmail}`,
+    ].join("\\n");
+
+    await sandbox.exec(`mkdir -p /root/.cyrus && printf '${envContent}' > /root/.cyrus/.env`);
+    steps.push("init: created .env");
+
+    // Step 3: Configure git
+    await sandbox.exec(`git config --global user.name "${gitName}" && git config --global user.email "${gitEmail}"`);
+    if (ghToken) {
+      await sandbox.exec(`echo "https://${ghToken}:x-oauth-basic@github.com" > ~/.git-credentials && git config --global credential.helper store`);
+    }
+    steps.push("git: configured");
+
+    // Step 4: Check if Cyrus is already running
+    const checkRunning = await sandbox.exec("pgrep -f 'cyrus start' && echo 'running' || echo 'not running'");
+    if (checkRunning.stdout.includes("running")) {
+      steps.push("cyrus: already running");
+    } else {
+      // Start Cyrus in background
+      await sandbox.exec("nohup cyrus start > /var/log/cyrus.log 2>&1 &");
+      await sandbox.exec("sleep 3");
+
+      // Verify it started
+      const checkStarted = await sandbox.exec("pgrep -f 'cyrus start' && echo 'started' || echo 'failed'");
+      steps.push(`cyrus: ${checkStarted.stdout.includes("started") ? "started" : "failed to start"}`);
+    }
+
+    return Response.json({
+      success: true,
+      message: "Bootstrap complete",
+      steps,
+    });
+  }
+
+  // Restore config from R2 to sandbox
+  if (url.pathname === "/api/restore" && request.method === "POST") {
+    const result = await restoreConfigFromR2(sandbox, env);
+    return Response.json({
+      success: result.restored,
+      message: result.restored ? "Config restored from R2" : "No config found in R2",
+      files: result.files,
+    });
+  }
+
+  // Save config from sandbox to R2
+  if (url.pathname === "/api/save" && request.method === "POST") {
+    const result = await saveConfigToR2(sandbox, env);
+    return Response.json({
+      success: result.saved,
+      message: result.saved ? "Config saved to R2" : "No config to save",
+      files: result.files,
+    });
+  }
 
   // Get sandbox status (avoid showing full command args which could contain PHI/PII)
   if (url.pathname === "/api/status") {
@@ -239,11 +433,23 @@ async function handleApiRoutes(
       }, { status: 400 });
     }
 
+    // Check if Cyrus is already running
+    const checkRunning = await sandbox.exec("pgrep -f 'cyrus start' && echo 'running'");
+    if (checkRunning.stdout.includes("running")) {
+      return Response.json({
+        success: true,
+        message: "Cyrus is already running",
+      });
+    }
+
     // Start Cyrus in background
-    const result = await sandbox.exec("nohup /usr/local/bin/start-cyrus.sh > /var/log/cyrus.log 2>&1 &");
+    const result = await sandbox.exec("nohup cyrus start > /var/log/cyrus.log 2>&1 & sleep 2 && pgrep -f 'cyrus start' && echo 'started'");
+    const started = result.stdout.includes("started");
+
     return Response.json({
-      success: true,
-      message: "Cyrus starting. Check /api/status for process list.",
+      success: started,
+      message: started ? "Cyrus started. Check /api/status for process list." : "Failed to start Cyrus",
+      error: started ? undefined : result.stderr,
     });
   }
 
