@@ -296,12 +296,22 @@ export default {
           if (token !== env.GATEWAY_TOKEN) {
             return new Response("Unauthorized - invalid or missing token", { status: 401 });
           }
+        } else {
+          console.warn("WARNING: GATEWAY_TOKEN not set - Admin UI and API routes are unprotected!");
         }
-        return handleAdminUI(request, env, url);
+        return handleAdminUI(url);
       }
 
-      // API routes
+      // API routes (protected by gateway token)
       if (url.pathname.startsWith("/api/")) {
+        if (env.GATEWAY_TOKEN) {
+          const token = url.searchParams.get("token");
+          if (token !== env.GATEWAY_TOKEN) {
+            return new Response("Unauthorized - invalid or missing token", { status: 401 });
+          }
+        } else {
+          console.warn("WARNING: GATEWAY_TOKEN not set - Admin UI and API routes are unprotected!");
+        }
         return await handleApiRoutes(request, env, url);
       }
 
@@ -874,7 +884,7 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   }
 }
 
-function handleAdminUI(request: Request, env: Env, url: URL): Response {
+function handleAdminUI(url: URL): Response {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1043,12 +1053,17 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
   </div>
 
   <script>
+    // Get token from URL for API calls
+    const urlParams = new URLSearchParams(window.location.search);
+    const apiToken = urlParams.get('token') || '';
+    const apiBase = (path) => path + (apiToken ? '?token=' + encodeURIComponent(apiToken) : '');
+
     // Cyrus Status
     async function refreshCyrusStatus() {
       try {
         const [configRes, statusRes] = await Promise.all([
-          fetch('/api/config'),
-          fetch('/api/exec', {
+          fetch(apiBase('/api/config')),
+          fetch(apiBase('/api/exec'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command: 'curl -s http://localhost:3456/status 2>/dev/null && curl -s http://localhost:3456/version 2>/dev/null || echo "offline"' })
@@ -1112,7 +1127,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
     async function bootstrap() {
       document.getElementById('cyrusActionStatus').textContent = 'Bootstrapping...';
       try {
-        const res = await fetch('/api/bootstrap', { method: 'POST' });
+        const res = await fetch(apiBase('/api/bootstrap'), { method: 'POST' });
         const data = await res.json();
         document.getElementById('cyrusActionStatus').textContent = data.success ? 'Done!' : 'Failed';
         setTimeout(() => { refreshCyrusStatus(); refreshLogs(); }, 2000);
@@ -1125,7 +1140,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
     async function refreshContainer() {
       document.getElementById('containerStatus').innerHTML = 'Loading...';
       try {
-        const res = await fetch('/api/status');
+        const res = await fetch(apiBase('/api/status'));
         const data = await res.json();
         const lines = (data.output || '').split('\\n').filter(l => l.includes('node') || l.includes('cyrus')).slice(0, 5);
         document.getElementById('containerStatus').innerHTML =
@@ -1139,7 +1154,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
     async function restartContainer() {
       document.getElementById('containerActionStatus').textContent = 'Restarting...';
       try {
-        const res = await fetch('/api/restart', { method: 'POST' });
+        const res = await fetch(apiBase('/api/restart'), { method: 'POST' });
         const data = await res.json();
         document.getElementById('containerActionStatus').textContent = data.success ? 'Restarted!' : 'Failed';
         setTimeout(refreshContainer, 2000);
@@ -1156,7 +1171,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
 
       document.getElementById('addRepoStatus').innerHTML = '<span style="color: #666;">Adding repository...</span>';
       try {
-        const res = await fetch('/api/add-repo', {
+        const res = await fetch(apiBase('/api/add-repo'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url, workspace: workspace || undefined })
@@ -1167,7 +1182,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
           document.getElementById('repoUrl').value = '';
           document.getElementById('repoWorkspace').value = '';
           // Save to R2 after adding
-          await fetch('/api/save', { method: 'POST' });
+          await fetch(apiBase('/api/save'), { method: 'POST' });
           setTimeout(refreshCyrusStatus, 1000);
         } else {
           document.getElementById('addRepoStatus').innerHTML = '<span style="color: red;">Failed: ' + (data.stderr || data.error || 'Unknown error') + '</span>';
@@ -1180,7 +1195,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
     // Logs
     async function refreshLogs() {
       try {
-        const res = await fetch('/api/exec', {
+        const res = await fetch(apiBase('/api/exec'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: 'tail -30 /var/log/cyrus.log 2>/dev/null || echo "No logs available"' })
@@ -1196,7 +1211,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
     async function saveConfig() {
       document.getElementById('storageStatus').textContent = 'Saving...';
       try {
-        const res = await fetch('/api/save', { method: 'POST' });
+        const res = await fetch(apiBase('/api/save'), { method: 'POST' });
         const data = await res.json();
         document.getElementById('storageStatus').textContent = data.success ? 'Saved!' : 'Failed';
       } catch (e) {
@@ -1207,7 +1222,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
     async function restoreConfig() {
       document.getElementById('storageStatus').textContent = 'Restoring...';
       try {
-        const res = await fetch('/api/restore', { method: 'POST' });
+        const res = await fetch(apiBase('/api/restore'), { method: 'POST' });
         const data = await res.json();
         document.getElementById('storageStatus').textContent = data.success ? 'Restored!' : 'Failed';
         setTimeout(refreshCyrusStatus, 1000);
@@ -1222,7 +1237,7 @@ function handleAdminUI(request: Request, env: Env, url: URL): Response {
       if (!cmd) return;
       document.getElementById('cmdOutput').textContent = 'Executing...';
       try {
-        const res = await fetch('/api/exec', {
+        const res = await fetch(apiBase('/api/exec'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: cmd })

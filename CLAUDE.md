@@ -104,10 +104,10 @@ Set via `npx wrangler secret put <NAME>`:
 Authentication is handled by:
 - **Webhook endpoint**: Linear signature verification (HMAC-SHA256 with `LINEAR_WEBHOOK_SECRET`)
 - **Admin UI**: Protected by `GATEWAY_TOKEN` query parameter (access via `/_admin/?token=...`)
-- **API routes**: Publicly accessible but require sandbox to be running to do anything meaningful
+- **API routes**: Protected by `GATEWAY_TOKEN` query parameter (same as Admin UI)
 - **External APIs**: Protected by API keys (Anthropic, GitHub)
 
-No Cloudflare Zero Trust - the webhook signature verification and API keys provide sufficient protection.
+The `GATEWAY_TOKEN` never leaves the Worker - it's checked before any sandbox calls are made, so the container never sees it.
 
 ## HIPAA/PHI Considerations
 

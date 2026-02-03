@@ -142,6 +142,8 @@ Features:
 
 ## API Endpoints
 
+All `/api/*` endpoints require the `GATEWAY_TOKEN` query parameter (e.g., `/api/status?token=YOUR_TOKEN`).
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
