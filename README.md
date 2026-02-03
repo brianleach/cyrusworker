@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="CyrusWorker" width="200">
+</p>
+
 # CyrusWorker
 
 Run [Cyrus Community Edition](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
@@ -77,6 +81,12 @@ npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put GH_TOKEN
 npx wrangler secret put GIT_USER_NAME
 npx wrangler secret put GIT_USER_EMAIL
+
+# Admin UI protection (generate a random token)
+export GATEWAY_TOKEN=$(openssl rand -hex 32)
+echo "Save this token: $GATEWAY_TOKEN"
+echo "$GATEWAY_TOKEN" | npx wrangler secret put GATEWAY_TOKEN
+# Treat this token like a password - anyone with it can access your Admin UI
 ```
 
 ### Step 3: Authorize Cyrus with Linear
@@ -91,7 +101,7 @@ You should see "Authorization Complete!" with your organization name.
 
 ### Step 4: Add a Repository
 
-Open the Admin UI at `https://your-worker.workers.dev/_admin/` and use the "Add Repository" form, or via API:
+Open the Admin UI at `https://your-worker.workers.dev/_admin/?token=YOUR_GATEWAY_TOKEN` and use the "Add Repository" form, or via API:
 
 ```bash
 curl -X POST https://your-worker.workers.dev/api/add-repo \
@@ -116,16 +126,7 @@ In Linear, open any issue and click **Delegate to... → Cyrus**. Cyrus will pro
 
 ## Admin UI
 
-The Admin UI is protected by a gateway token. First, generate and set the token:
-
-```bash
-# Generate and set a gateway token
-export GATEWAY_TOKEN=$(openssl rand -hex 32)
-echo "Your gateway token: $GATEWAY_TOKEN"
-echo "$GATEWAY_TOKEN" | npx wrangler secret put GATEWAY_TOKEN
-```
-
-Then access the Admin UI with your token:
+The Admin UI is protected by the `GATEWAY_TOKEN` set in [Step 2](#step-2-set-secrets). Access it at:
 
 ```
 https://your-worker.workers.dev/_admin/?token=YOUR_GATEWAY_TOKEN
