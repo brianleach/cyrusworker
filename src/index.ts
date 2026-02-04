@@ -1032,6 +1032,7 @@ function handleAdminUI(url: URL): Response {
     <h2>Cyrus Logs</h2>
     <pre id="cyrusLogs" class="log-output">Loading...</pre>
     <button onclick="refreshLogs()">Refresh Logs</button>
+    <button class="secondary" onclick="copyToClipboard('cyrusLogs')">Copy</button>
   </div>
 
   <div class="grid">
@@ -1047,6 +1048,7 @@ function handleAdminUI(url: URL): Response {
       <div class="inline-form">
         <input type="text" id="cmdInput" placeholder="ls -la /root/.cyrus" />
         <button onclick="runCommand()">Run</button>
+        <button class="secondary" onclick="copyToClipboard('cmdOutput')">Copy</button>
       </div>
       <pre id="cmdOutput" style="min-height: 60px;"></pre>
     </div>
@@ -1057,6 +1059,21 @@ function handleAdminUI(url: URL): Response {
     const urlParams = new URLSearchParams(window.location.search);
     const apiToken = urlParams.get('token') || '';
     const apiBase = (path) => path + (apiToken ? '?token=' + encodeURIComponent(apiToken) : '');
+
+    // Copy to clipboard helper
+    function copyToClipboard(elementId) {
+      const el = document.getElementById(elementId);
+      const text = el.textContent || el.innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = event.target;
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = original, 1500);
+      }).catch(err => {
+        console.error('Copy failed:', err);
+        alert('Copy failed - please select and copy manually');
+      });
+    }
 
     // Cyrus Status
     async function refreshCyrusStatus() {
@@ -1082,15 +1099,19 @@ function handleAdminUI(url: URL): Response {
         if (statusData.stdout && !statusData.stdout.includes('offline')) {
           try {
             const parts = statusData.stdout.split('}{');
-            if (parts.length >= 1) {
-              const status = JSON.parse(parts[0] + (parts.length > 1 ? '' : ''));
+            if (parts.length === 1) {
+              // Only status response
+              const status = JSON.parse(parts[0]);
               cyrusStatus = status.status || 'unknown';
-            }
-            if (parts.length >= 2) {
+            } else if (parts.length >= 2) {
+              // Both status and version responses concatenated
+              const status = JSON.parse(parts[0] + '}');
+              cyrusStatus = status.status || 'unknown';
               const version = JSON.parse('{' + parts[1]);
               cyrusVersion = version.cyrus_cli_version || '-';
             }
           } catch (e) {
+            console.error('Status parse error:', e, statusData.stdout);
             cyrusStatus = 'error';
           }
         }
