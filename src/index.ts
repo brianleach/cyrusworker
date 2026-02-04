@@ -51,19 +51,104 @@ async function getOAuthTokenFromR2(env: Env): Promise<{
   access_token: string;
   organization_id: string;
   organization_name: string;
+  refresh_token?: string;
+  created_at?: number;
+  expires_in?: number;
 } | null> {
   try {
     const tokenObj = await env.CYRUS_STORAGE.get("tokens/latest.json");
     if (!tokenObj) return null;
 
-    return JSON.parse(await tokenObj.text()) as {
-      access_token: string;
-      organization_id: string;
-      organization_name: string;
-    };
+    return JSON.parse(await tokenObj.text());
   } catch (error) {
     console.error("Failed to get token from R2:", error);
     return null;
+  }
+}
+
+// Refresh OAuth token if expired or about to expire
+async function refreshOAuthTokenIfNeeded(env: Env): Promise<{
+  refreshed: boolean;
+  access_token?: string;
+  error?: string;
+}> {
+  const tokenData = await getOAuthTokenFromR2(env);
+  if (!tokenData) {
+    return { refreshed: false, error: "No token found" };
+  }
+
+  // Check if token is expired or will expire in next 5 minutes
+  const now = Date.now();
+  const expiresAt = (tokenData.created_at || 0) + ((tokenData.expires_in || 86400) * 1000);
+  const fiveMinutes = 5 * 60 * 1000;
+
+  if (now < expiresAt - fiveMinutes) {
+    // Token is still valid
+    return { refreshed: false, access_token: tokenData.access_token };
+  }
+
+  // Token is expired or about to expire - try to refresh
+  if (!tokenData.refresh_token) {
+    return { refreshed: false, error: "Token expired and no refresh token available" };
+  }
+
+  if (!env.LINEAR_CLIENT_ID || !env.LINEAR_CLIENT_SECRET) {
+    return { refreshed: false, error: "Missing OAuth credentials for refresh" };
+  }
+
+  console.log("Refreshing expired OAuth token...");
+
+  try {
+    const refreshResponse = await fetch("https://api.linear.app/oauth/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: env.LINEAR_CLIENT_ID,
+        client_secret: env.LINEAR_CLIENT_SECRET,
+        refresh_token: tokenData.refresh_token,
+      }),
+    });
+
+    if (!refreshResponse.ok) {
+      const errorText = await refreshResponse.text();
+      console.error("Token refresh failed:", errorText);
+      return { refreshed: false, error: `Refresh failed: ${refreshResponse.status}` };
+    }
+
+    const newTokens = await refreshResponse.json() as {
+      access_token: string;
+      token_type: string;
+      expires_in?: number;
+      scope?: string;
+      refresh_token?: string;
+    };
+
+    // Update stored tokens
+    const updatedTokenData = {
+      ...tokenData,
+      access_token: newTokens.access_token,
+      expires_in: newTokens.expires_in,
+      refresh_token: newTokens.refresh_token || tokenData.refresh_token,
+      created_at: Date.now(),
+    };
+
+    await env.CYRUS_STORAGE.put(
+      `tokens/${tokenData.organization_id}.json`,
+      JSON.stringify(updatedTokenData, null, 2)
+    );
+    await env.CYRUS_STORAGE.put(
+      "tokens/latest.json",
+      JSON.stringify(updatedTokenData, null, 2)
+    );
+
+    console.log("OAuth token refreshed successfully");
+    return { refreshed: true, access_token: newTokens.access_token };
+  } catch (error) {
+    console.error("Token refresh error:", error);
+    return { refreshed: false, error: String(error) };
   }
 }
 
@@ -331,6 +416,33 @@ export default {
   },
 };
 
+// Helper to update linearToken in config.json for all repositories
+async function updateConfigTokens(
+  sandbox: ReturnType<typeof getSandbox>,
+  newToken: string
+): Promise<boolean> {
+  try {
+    const configResult = await sandbox.exec("cat /root/.cyrus/config.json 2>/dev/null || echo '{}'");
+    if (!configResult.stdout || configResult.stdout.trim() === '{}') return false;
+
+    const config = JSON.parse(configResult.stdout) as { repositories?: Array<{ linearToken?: string }> };
+    if (!config.repositories || config.repositories.length === 0) return false;
+
+    // Update all repositories with new token
+    for (const repo of config.repositories) {
+      repo.linearToken = newToken;
+    }
+
+    const updatedConfig = JSON.stringify(config, null, 2);
+    const b64 = btoa(updatedConfig);
+    await sandbox.exec(`echo ${b64} | base64 -d > /root/.cyrus/config.json`);
+    return true;
+  } catch (error) {
+    console.error("Failed to update config tokens:", error);
+    return false;
+  }
+}
+
 // Helper to run bootstrap sequence
 async function runBootstrap(
   sandbox: ReturnType<typeof getSandbox>,
@@ -339,6 +451,16 @@ async function runBootstrap(
 ): Promise<string[]> {
   const steps: string[] = [];
 
+  // Refresh OAuth token if needed (before anything else)
+  const refreshResult = await refreshOAuthTokenIfNeeded(env);
+  if (refreshResult.error) {
+    steps.push(`token: ${refreshResult.error}`);
+  } else if (refreshResult.refreshed) {
+    steps.push("token: refreshed");
+  } else {
+    steps.push("token: valid");
+  }
+
   // Kill any existing Cyrus to prevent config overwrite
   await sandbox.exec("pkill -f 'cyrus start' 2>/dev/null || true");
   await sandbox.exec("sleep 1");
@@ -346,6 +468,16 @@ async function runBootstrap(
   // Restore config from R2
   const restoreResult = await restoreConfigFromR2(sandbox, env);
   steps.push(`restore: ${restoreResult.restored ? restoreResult.files.length + " files" : "none"}`);
+
+  // If token was refreshed, update the config with new token
+  if (refreshResult.refreshed && refreshResult.access_token) {
+    const updated = await updateConfigTokens(sandbox, refreshResult.access_token);
+    if (updated) {
+      steps.push("config: tokens updated");
+      // Also save updated config back to R2
+      await saveConfigToR2(sandbox, env);
+    }
+  }
 
   // Create .env file
   const gitName = env.GIT_USER_NAME || "Cyrus";
@@ -444,6 +576,7 @@ async function processWebhookInBackground(
     const sandbox = getSandbox(env.Sandbox, "primary");
 
     // Check if Cyrus is running, auto-bootstrap if not
+    // Token refresh happens automatically during bootstrap
     const healthCheck = await sandbox.exec("curl -s -o /dev/null -w '%{http_code}' http://localhost:3456/status 2>/dev/null || echo '000'");
     const isRunning = healthCheck.stdout && !healthCheck.stdout.includes("000");
 
@@ -685,6 +818,30 @@ async function handleApiRoutes(
     });
   }
 
+  // Refresh OAuth token
+  if (url.pathname === "/api/refresh-token" && request.method === "POST") {
+    const result = await refreshOAuthTokenIfNeeded(env);
+
+    // If token was refreshed, also update the config in sandbox
+    if (result.refreshed && result.access_token) {
+      const updated = await updateConfigTokens(sandbox, result.access_token);
+      if (updated) {
+        await saveConfigToR2(sandbox, env);
+      }
+      return Response.json({
+        success: true,
+        message: "Token refreshed and config updated",
+        refreshed: true,
+      });
+    }
+
+    return Response.json({
+      success: !result.error,
+      message: result.error || "Token is still valid",
+      refreshed: result.refreshed,
+    });
+  }
+
   // Sync OAuth tokens from R2 to sandbox
   if (url.pathname === "/api/sync-tokens" && request.method === "POST") {
     try {
@@ -794,6 +951,7 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
       token_type: string;
       expires_in?: number;
       scope?: string;
+      refresh_token?: string;
     };
 
     // Get organization info to identify the workspace
@@ -822,6 +980,7 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
       token_type: tokens.token_type,
       expires_in: tokens.expires_in,
       scope: tokens.scope,
+      refresh_token: tokens.refresh_token,
       organization_id: orgInfo.id,
       organization_name: orgInfo.name,
       created_at: Date.now(),
@@ -1048,9 +1207,10 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
 
     <div class="card">
       <h2>Linear OAuth</h2>
-      <button onclick="reauthorizeLinear()">Reauthorize with Linear</button>
+      <button onclick="refreshToken()">Refresh Token</button>
+      <button class="secondary" onclick="reauthorizeLinear()">Reauthorize</button>
       <span id="oauthStatus"></span>
-      <p style="font-size: 12px; color: #666; margin-top: 8px;">Use this if Cyrus can't fetch issue details</p>
+      <p style="font-size: 12px; color: #666; margin-top: 8px;">Tokens auto-refresh during bootstrap. Use Reauthorize if refresh fails.</p>
     </div>
   </div>
 
@@ -1083,6 +1243,26 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
         console.error('Copy failed:', err);
         alert('Copy failed - please select and copy manually');
       });
+    }
+
+    // Refresh OAuth token
+    async function refreshToken() {
+      document.getElementById('oauthStatus').innerHTML = '<span style="color: #666;">Refreshing...</span>';
+      try {
+        const res = await fetch(apiBase('/api/refresh-token'), { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          document.getElementById('oauthStatus').innerHTML = '<span style="color: green;">' + data.message + '</span>';
+          if (data.refreshed) {
+            // Restart Cyrus to pick up new token
+            setTimeout(() => bootstrap(), 1000);
+          }
+        } else {
+          document.getElementById('oauthStatus').innerHTML = '<span style="color: red;">' + (data.message || 'Refresh failed') + '</span>';
+        }
+      } catch (e) {
+        document.getElementById('oauthStatus').innerHTML = '<span style="color: red;">Error: ' + e.message + '</span>';
+      }
     }
 
     // Reauthorize with Linear
