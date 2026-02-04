@@ -1209,8 +1209,8 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
       <h2>Linear OAuth</h2>
       <button onclick="refreshToken()">Refresh Token</button>
       <button class="secondary" onclick="reauthorizeLinear()">Reauthorize</button>
-      <span id="oauthStatus"></span>
-      <p style="font-size: 12px; color: #666; margin-top: 8px;">Tokens auto-refresh during bootstrap. Use Reauthorize if refresh fails.</p>
+      <p id="oauthStatus" style="font-size: 12px; color: #666; margin-top: 8px;"></p>
+      <p style="font-size: 12px; color: #666; margin-top: 4px;">Tokens auto-refresh during bootstrap. Use Reauthorize if refresh fails.</p>
     </div>
   </div>
 
@@ -1247,21 +1247,21 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
 
     // Refresh OAuth token
     async function refreshToken() {
-      document.getElementById('oauthStatus').innerHTML = '<span style="color: #666;">Refreshing...</span>';
+      document.getElementById('oauthStatus').textContent = 'Refreshing...';
       try {
         const res = await fetch(apiBase('/api/refresh-token'), { method: 'POST' });
         const data = await res.json();
         if (data.success) {
-          document.getElementById('oauthStatus').innerHTML = '<span style="color: green;">' + data.message + '</span>';
+          const el = document.getElementById('oauthStatus'); el.textContent = data.message; el.style.color = 'green';
           if (data.refreshed) {
             // Restart Cyrus to pick up new token
             setTimeout(() => bootstrap(), 1000);
           }
         } else {
-          document.getElementById('oauthStatus').innerHTML = '<span style="color: red;">' + (data.message || 'Refresh failed') + '</span>';
+          const el = document.getElementById('oauthStatus'); el.textContent = data.message || 'Refresh failed'; el.style.color = 'red';
         }
       } catch (e) {
-        document.getElementById('oauthStatus').innerHTML = '<span style="color: red;">Error: ' + e.message + '</span>';
+        const el = document.getElementById('oauthStatus'); el.textContent = 'Error: ' + e.message; el.style.color = 'red';
       }
     }
 
@@ -1269,13 +1269,13 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     function reauthorizeLinear() {
       const clientId = '${linearClientId}';
       if (!clientId) {
-        document.getElementById('oauthStatus').innerHTML = '<span style="color: red;">LINEAR_CLIENT_ID not configured</span>';
+        const el = document.getElementById('oauthStatus'); el.textContent = 'LINEAR_CLIENT_ID not configured'; el.style.color = 'red';
         return;
       }
       const redirectUri = encodeURIComponent(window.location.origin + '/callback');
       const authUrl = \`https://linear.app/oauth/authorize?client_id=\${clientId}&redirect_uri=\${redirectUri}&response_type=code&scope=write,app:assignable,app:mentionable&actor=app\`;
       window.open(authUrl, '_blank');
-      document.getElementById('oauthStatus').innerHTML = '<span style="color: #666;">Auth window opened - click Bootstrap after authorizing</span>';
+      document.getElementById('oauthStatus').textContent = 'Auth window opened - click Bootstrap after authorizing';
     }
 
     // Cyrus Status
