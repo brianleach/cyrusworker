@@ -246,6 +246,23 @@ See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
 - Ensure you completed the OAuth authorization flow
 - Check that the webhook URL is correct and responding
 
+### Linear says "did not respond" or Cyrus fails to fetch issue details
+
+This usually means the OAuth token in Cyrus's config is stale. To fix:
+
+1. Open Admin UI and click **Bootstrap** - this syncs the fresh token from storage to Cyrus
+2. If that doesn't work, click **Reauthorize** to get a completely new token, then **Bootstrap**
+
+You can verify the token is working by running this in Execute:
+```bash
+cat /root/.cyrus/config.json | grep linearToken
+```
+Then test it:
+```bash
+curl -s -H "Authorization: Bearer YOUR_TOKEN_HERE" https://api.linear.app/graphql \
+  -H "Content-Type: application/json" -d '{"query":"{ viewer { id } }"}'
+```
+
 ### Webhooks aren't being received
 
 - Check webhook URL matches your worker: `https://your-worker.workers.dev/webhook`

@@ -469,14 +469,17 @@ async function runBootstrap(
   const restoreResult = await restoreConfigFromR2(sandbox, env);
   steps.push(`restore: ${restoreResult.restored ? restoreResult.files.length + " files" : "none"}`);
 
-  // If token was refreshed, update the config with new token
-  if (refreshResult.refreshed && refreshResult.access_token) {
+  // Always sync the latest token from R2 to config (config.json in R2 may have stale token)
+  if (refreshResult.access_token) {
     const updated = await updateConfigTokens(sandbox, refreshResult.access_token);
     if (updated) {
-      steps.push("config: tokens updated");
-      // Also save updated config back to R2
+      steps.push("config: tokens synced");
+      // Save updated config back to R2 so next restore has fresh token
       await saveConfigToR2(sandbox, env);
     }
+  } else if (refreshResult.refreshed) {
+    // Token was refreshed but we don't have it - shouldn't happen but log it
+    steps.push("config: refresh succeeded but no token returned");
   }
 
   // Create .env file
