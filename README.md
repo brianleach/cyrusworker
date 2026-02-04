@@ -283,3 +283,7 @@ curl -s -H "Authorization: Bearer YOUR_TOKEN_HERE" https://api.linear.app/graphq
 ## License
 
 MIT
+
+## Contact
+
+Questions or feedback? Reach me on [LinkedIn](https://www.linkedin.com/in/bleach/) or email bleach@gmail.com
