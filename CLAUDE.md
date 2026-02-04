@@ -151,7 +151,7 @@ After deploying the worker:
 
 5. Add a repository via Admin UI or API:
    ```bash
-   curl -X POST https://your-worker.workers.dev/api/add-repo \
+   curl -X POST "https://your-worker.workers.dev/api/add-repo?token=YOUR_GATEWAY_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"url": "https://github.com/org/repo"}'
    ```

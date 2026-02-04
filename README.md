@@ -104,7 +104,7 @@ You should see "Authorization Complete!" with your organization name.
 Open the Admin UI at `https://your-worker.workers.dev/_admin/?token=YOUR_GATEWAY_TOKEN` and use the "Add Repository" form, or via API:
 
 ```bash
-curl -X POST https://your-worker.workers.dev/api/add-repo \
+curl -X POST "https://your-worker.workers.dev/api/add-repo?token=YOUR_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://github.com/your-org/your-repo.git"}'
 ```
@@ -245,15 +245,6 @@ See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
 - Verify **Agent session events** is enabled in your OAuth Application
 - Ensure you completed the OAuth authorization flow
 - Check that the webhook URL is correct and responding
-
-### First webhook fails / "did not respond"
-
-The container may have been cold. CyrusWorker now auto-bootstraps on webhook, but the first request after a cold start may timeout. Try delegating again - it should work on the second attempt.
-
-You can also manually bootstrap via Admin UI or:
-```bash
-curl -X POST https://your-worker.workers.dev/api/bootstrap
-```
 
 ### Webhooks aren't being received
 
