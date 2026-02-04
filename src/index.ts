@@ -1091,7 +1091,8 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
       }
       const redirectUri = encodeURIComponent(window.location.origin + '/callback');
       const authUrl = \`https://linear.app/oauth/authorize?client_id=\${clientId}&redirect_uri=\${redirectUri}&response_type=code&scope=write,app:assignable,app:mentionable&actor=app\`;
-      window.location.href = authUrl;
+      window.open(authUrl, '_blank');
+      document.getElementById('oauthStatus').innerHTML = '<span style="color: #666;">Auth window opened - click Bootstrap after authorizing</span>';
     }
 
     // Cyrus Status
