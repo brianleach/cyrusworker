@@ -406,7 +406,7 @@ async function handleAgentSessionWebhook(
 
   // Verify webhook signature if secret is configured
   if (env.LINEAR_WEBHOOK_SECRET) {
-    if (!verifyLinearSignature(body, signature, env.LINEAR_WEBHOOK_SECRET)) {
+    if (!(await verifyLinearSignature(body, signature, env.LINEAR_WEBHOOK_SECRET))) {
       return new Response("Invalid signature", { status: 401 });
     }
   }
@@ -1263,14 +1263,40 @@ function handleAdminUI(url: URL): Response {
   });
 }
 
-function verifyLinearSignature(
+async function verifyLinearSignature(
   body: string,
   signature: string | null,
   secret: string
-): boolean {
-  // TODO: Implement HMAC-SHA256 verification
-  // For now, just check signature exists
+): Promise<boolean> {
   if (!signature) return false;
-  return true;
+
+  try {
+    // Import the secret as a crypto key
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+
+    // Compute the expected signature
+    const signatureBuffer = await crypto.subtle.sign("HMAC", key, encoder.encode(body));
+    const expectedSignature = Array.from(new Uint8Array(signatureBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    // Constant-time comparison to prevent timing attacks
+    if (signature.length !== expectedSignature.length) return false;
+    let result = 0;
+    for (let i = 0; i < signature.length; i++) {
+      result |= signature.charCodeAt(i) ^ expectedSignature.charCodeAt(i);
+    }
+    return result === 0;
+  } catch (error) {
+    console.error("Signature verification error:", error);
+    return false;
+  }
 }
 

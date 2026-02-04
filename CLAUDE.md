@@ -196,4 +196,4 @@ This means cold starts are handled automatically - the first webhook after a con
 
 ## Known TODOs
 
-- `verifyLinearSignature()` needs proper HMAC-SHA256 implementation (currently just checks signature exists)
+None at this time.
