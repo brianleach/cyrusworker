@@ -354,6 +354,35 @@ async function cloneMissingRepos(
 }
 
 export default {
+  // Cron trigger handler - ensures Cyrus stays running
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const sandbox = getSandbox(env.Sandbox, "primary");
+
+    // Check if Cyrus is running
+    const healthCheck = await sandbox.exec(
+      "curl -s -o /dev/null -w '%{http_code}' http://localhost:3456/status 2>/dev/null || echo '000'"
+    );
+    const isRunning = healthCheck.stdout && !healthCheck.stdout.includes("000");
+
+    if (!isRunning) {
+      console.log("Scheduled check: Cyrus not running, bootstrapping...");
+
+      // Try to get stored base URL from R2, otherwise use a placeholder
+      let baseUrl = "https://cyrusworker.workers.dev";
+      try {
+        const baseUrlObj = await env.CYRUS_STORAGE.get("config/base-url.txt");
+        if (baseUrlObj) {
+          baseUrl = await baseUrlObj.text();
+        }
+      } catch (e) {
+        // Ignore - use default
+      }
+
+      const steps = await runBootstrap(sandbox, env, baseUrl);
+      console.log("Scheduled bootstrap complete:", steps);
+    }
+  },
+
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
@@ -370,7 +399,7 @@ export default {
 
       // Linear OAuth callback
       if (url.pathname === "/callback") {
-        return await handleOAuthCallback(request, env);
+        return await handleOAuthCallback(request, env, ctx);
       }
 
       // Admin UI (protected by gateway token)
@@ -535,6 +564,9 @@ async function handleAgentSessionWebhook(
   const body = await request.text();
   const url = new URL(request.url);
   const signature = request.headers.get("linear-signature") || "";
+
+  // Store base URL for scheduled bootstraps (fire and forget)
+  ctx.waitUntil(env.CYRUS_STORAGE.put("config/base-url.txt", url.origin));
 
   // Verify webhook signature if secret is configured
   if (env.LINEAR_WEBHOOK_SECRET) {
@@ -884,11 +916,14 @@ async function handleApiRoutes(
   return new Response("Not Found", { status: 404 });
 }
 
-async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
+async function handleOAuthCallback(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const error = url.searchParams.get("error");
+
+  // Store base URL for scheduled bootstraps
+  await env.CYRUS_STORAGE.put("config/base-url.txt", url.origin);
 
   // Debug logging
   console.log("OAuth callback received:", {
@@ -997,9 +1032,19 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
       JSON.stringify(tokenData, null, 2)
     );
 
-    // NOTE: Skipping sandbox write here - it causes timeouts during OAuth flow
-    // Tokens are stored in R2 and can be synced to sandbox via /api/init
     console.log("OAuth tokens stored in R2 for org:", orgInfo.id, orgInfo.name);
+
+    // Auto-bootstrap in background so Cyrus picks up the new token
+    ctx.waitUntil((async () => {
+      try {
+        const sandbox = getSandbox(env.Sandbox, "primary");
+        console.log("Auto-bootstrapping after OAuth...");
+        const steps = await runBootstrap(sandbox, env, url.origin);
+        console.log("Auto-bootstrap complete:", steps);
+      } catch (error) {
+        console.error("Auto-bootstrap failed:", error);
+      }
+    })());
 
     // Return success page
     const html = `<!DOCTYPE html>
@@ -1017,11 +1062,13 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   <div class="success">
     <h2>✅ Authorization Complete!</h2>
     <p>Cyrus is now connected to <strong>${orgInfo.name}</strong>.</p>
+    <p style="margin-top: 12px;">🔄 Bootstrapping Cyrus in background...</p>
   </div>
   <div class="info">
     <p><strong>Next steps:</strong></p>
     <ol>
-      <li>Add a repository using the admin panel or API</li>
+      <li>Wait ~10 seconds for bootstrap to complete</li>
+      <li>Add a repository using the admin panel (if not already added)</li>
       <li>Delegate an issue to Cyrus in Linear</li>
     </ol>
     <p>Organization ID: <code>${orgInfo.id}</code></p>
@@ -1193,7 +1240,7 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     <button onclick="refreshLogs()">Refresh</button>
     <button class="secondary" onclick="copyToClipboard('cyrusLogs')">Copy</button>
     <label style="margin-left: 16px; font-size: 13px; cursor: pointer;">
-      <input type="checkbox" id="autoRefreshLogs" onchange="toggleLogStream()" checked> Auto-refresh
+      <input type="checkbox" id="autoRefreshLogs" onchange="toggleLogStream()"> Auto-refresh
     </label>
   </div>
 
@@ -1233,16 +1280,35 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     // Copy to clipboard helper
     function copyToClipboard(elementId) {
       const el = document.getElementById(elementId);
-      const text = el.textContent || el.innerText;
-      navigator.clipboard.writeText(text).then(() => {
-        const btn = event.target;
-        const original = btn.textContent;
-        btn.textContent = 'Copied!';
-        setTimeout(() => btn.textContent = original, 1500);
-      }).catch(err => {
-        console.error('Copy failed:', err);
-        alert('Copy failed - please select and copy manually');
-      });
+      const text = el.textContent || el.innerText || '';
+      const btn = event.target;
+
+      // Try modern clipboard API first, fall back to textarea method
+      const fallbackCopy = () => {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+          document.execCommand('copy');
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy', 1500);
+        } catch (e) {
+          alert('Copy failed - please select and copy manually');
+        }
+        document.body.removeChild(textarea);
+      };
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy', 1500);
+        }).catch(fallbackCopy);
+      } else {
+        fallbackCopy();
+      }
     }
 
     // Refresh OAuth token
@@ -1494,7 +1560,7 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     refreshCyrusStatus();
     refreshContainer();
     refreshLogs();
-    toggleLogStream(); // Start auto-refresh since checkbox is checked by default
+    // Auto-refresh disabled by default to save compute
   </script>
 </body>
 </html>`;

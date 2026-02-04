@@ -74,6 +74,7 @@ config/
   config.json      # Cyrus configuration with repositories
   .env             # Environment variables
   repo-urls.json   # Clone URLs for auto-restore
+  base-url.txt     # Worker base URL for scheduled bootstraps
 tokens/
   {orgId}.json     # OAuth tokens by organization
   latest.json      # Most recent OAuth token
@@ -126,6 +127,7 @@ When working on this codebase, avoid adding logging that could capture issue tit
 
 ## Key Functions
 
+- `scheduled()` - Cron handler that keeps Cyrus running by bootstrapping if it's down
 - `runBootstrap()` - Full bootstrap sequence: kill Cyrus, restore from R2, init env, clone repos, start Cyrus
 - `handleAgentSessionWebhook()` - Receives webhooks, auto-bootstraps if needed, forwards to Cyrus
 - `restoreConfigFromR2()` - Restores config.json, .env, tokens from R2 to sandbox
@@ -160,7 +162,20 @@ After deploying the worker:
 
 ## Auto-Bootstrap
 
-The webhook handler automatically bootstraps if Cyrus isn't running:
+Cyrus is kept running through two mechanisms:
+
+### Scheduled Handler (Cron Trigger)
+
+A cron trigger runs every minute (`* * * * *`) and checks if Cyrus is running. If not, it automatically bootstraps. This ensures Cyrus stays running even when no webhooks are received.
+
+The scheduled handler:
+1. Checks health at `localhost:3456/status`
+2. If not responding, runs `runBootstrap()`
+3. Uses the stored base URL from R2 (saved on first request)
+
+### Webhook Auto-Bootstrap
+
+The webhook handler also bootstraps if Cyrus isn't running:
 
 1. Health check to `localhost:3456/status`
 2. If not responding, run full bootstrap:
@@ -172,7 +187,7 @@ The webhook handler automatically bootstraps if Cyrus isn't running:
    - Start Cyrus EdgeWorker
 3. Forward webhook to Cyrus
 
-This means cold starts are handled automatically - the first webhook after a container reset triggers bootstrap.
+This dual approach ensures Cyrus stays running proactively (via cron) and recovers quickly if down when a webhook arrives.
 
 ## Cyrus Source
 
