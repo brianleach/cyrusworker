@@ -1046,7 +1046,7 @@ function handleAdminUI(url: URL): Response {
       <h2>Execute Command</h2>
       <div class="inline-form">
         <input type="text" id="cmdInput" placeholder="ls -la /root/.cyrus" />
-        <button onclick="execCommand()">Run</button>
+        <button onclick="runCommand()">Run</button>
       </div>
       <pre id="cmdOutput" style="min-height: 60px;"></pre>
     </div>
@@ -1232,7 +1232,7 @@ function handleAdminUI(url: URL): Response {
     }
 
     // Execute
-    async function execCommand() {
+    async function runCommand() {
       const cmd = document.getElementById('cmdInput').value;
       if (!cmd) return;
       document.getElementById('cmdOutput').textContent = 'Executing...';
