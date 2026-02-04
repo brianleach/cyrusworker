@@ -299,7 +299,7 @@ export default {
         } else {
           console.warn("WARNING: GATEWAY_TOKEN not set - Admin UI and API routes are unprotected!");
         }
-        return handleAdminUI(url);
+        return handleAdminUI(url, env.LINEAR_CLIENT_ID || '');
       }
 
       // API routes (protected by gateway token)
@@ -884,7 +884,7 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   }
 }
 
-function handleAdminUI(url: URL): Response {
+function handleAdminUI(url: URL, linearClientId: string): Response {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1044,14 +1044,21 @@ function handleAdminUI(url: URL): Response {
     </div>
 
     <div class="card">
-      <h2>Execute Command</h2>
-      <div class="inline-form">
-        <input type="text" id="cmdInput" placeholder="ls -la /root/.cyrus" />
-        <button onclick="runCommand()">Run</button>
-        <button class="secondary" onclick="copyToClipboard('cmdOutput')">Copy</button>
-      </div>
-      <pre id="cmdOutput" style="min-height: 60px;"></pre>
+      <h2>Linear OAuth</h2>
+      <button onclick="reauthorizeLinear()">Reauthorize with Linear</button>
+      <span id="oauthStatus"></span>
+      <p style="font-size: 12px; color: #666; margin-top: 8px;">Use this if Cyrus can't fetch issue details</p>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Execute Command</h2>
+    <div class="inline-form" style="margin-bottom: 12px;">
+      <input type="text" id="cmdInput" placeholder="ls -la /root/.cyrus" />
+      <button onclick="runCommand()">Run</button>
+      <button class="secondary" onclick="copyToClipboard('cmdOutput')">Copy</button>
+    </div>
+    <pre id="cmdOutput" style="min-height: 100px; max-height: 400px;"></pre>
   </div>
 
   <script>
@@ -1073,6 +1080,18 @@ function handleAdminUI(url: URL): Response {
         console.error('Copy failed:', err);
         alert('Copy failed - please select and copy manually');
       });
+    }
+
+    // Reauthorize with Linear
+    function reauthorizeLinear() {
+      const clientId = '${linearClientId}';
+      if (!clientId) {
+        document.getElementById('oauthStatus').innerHTML = '<span style="color: red;">LINEAR_CLIENT_ID not configured</span>';
+        return;
+      }
+      const redirectUri = encodeURIComponent(window.location.origin + '/callback');
+      const authUrl = \`https://linear.app/oauth/authorize?client_id=\${clientId}&redirect_uri=\${redirectUri}&response_type=code&scope=write,app:assignable,app:mentionable&actor=app\`;
+      window.location.href = authUrl;
     }
 
     // Cyrus Status
