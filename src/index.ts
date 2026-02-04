@@ -354,35 +354,6 @@ async function cloneMissingRepos(
 }
 
 export default {
-  // Cron trigger handler - ensures Cyrus stays running
-  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    const sandbox = getSandbox(env.Sandbox, "primary");
-
-    // Check if Cyrus is running
-    const healthCheck = await sandbox.exec(
-      "curl -s -o /dev/null -w '%{http_code}' http://localhost:3456/status 2>/dev/null || echo '000'"
-    );
-    const isRunning = healthCheck.stdout && !healthCheck.stdout.includes("000");
-
-    if (!isRunning) {
-      console.log("Scheduled check: Cyrus not running, bootstrapping...");
-
-      // Try to get stored base URL from R2, otherwise use a placeholder
-      let baseUrl = "https://cyrusworker.workers.dev";
-      try {
-        const baseUrlObj = await env.CYRUS_STORAGE.get("config/base-url.txt");
-        if (baseUrlObj) {
-          baseUrl = await baseUrlObj.text();
-        }
-      } catch (e) {
-        // Ignore - use default
-      }
-
-      const steps = await runBootstrap(sandbox, env, baseUrl);
-      console.log("Scheduled bootstrap complete:", steps);
-    }
-  },
-
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
@@ -564,9 +535,6 @@ async function handleAgentSessionWebhook(
   const body = await request.text();
   const url = new URL(request.url);
   const signature = request.headers.get("linear-signature") || "";
-
-  // Store base URL for scheduled bootstraps (fire and forget)
-  ctx.waitUntil(env.CYRUS_STORAGE.put("config/base-url.txt", url.origin));
 
   // Verify webhook signature if secret is configured
   if (env.LINEAR_WEBHOOK_SECRET) {
@@ -921,9 +889,6 @@ async function handleOAuthCallback(request: Request, env: Env, ctx: ExecutionCon
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const error = url.searchParams.get("error");
-
-  // Store base URL for scheduled bootstraps
-  await env.CYRUS_STORAGE.put("config/base-url.txt", url.origin);
 
   // Debug logging
   console.log("OAuth callback received:", {

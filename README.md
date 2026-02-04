@@ -13,7 +13,7 @@ Inspired by [Moltworker](https://github.com/cloudflare/moltworker).
 Instead of running Cyrus Community Edition on a local Mac mini or VPS:
 
 - **No hardware required** - Runs in Cloudflare Sandbox containers
-- **Always on** - Cron trigger keeps Cyrus running, auto-bootstraps after container restarts
+- **Always on** - Auto-bootstraps on first webhook, sleeps when idle to save compute
 - **Global edge** - Low latency webhook processing worldwide
 - **Persistent storage** - R2 backup of config, tokens, and repo URLs
 - **Secure** - Webhook signature verification protects endpoints
