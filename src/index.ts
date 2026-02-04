@@ -972,7 +972,7 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     .stat-box { text-align: center; padding: 16px; background: #f8f9fa; border-radius: 8px; }
     .stat-box .value { font-size: 28px; font-weight: 700; color: #333; }
     .stat-box .label { font-size: 12px; color: #666; margin-top: 4px; }
-    .log-output { font-family: monospace; font-size: 11px; white-space: pre-wrap; }
+    .log-output { font-family: monospace; font-size: 11px; white-space: pre-wrap; max-height: 400px; overflow-y: auto; }
     .inline-form { display: flex; gap: 8px; }
     .inline-form input { flex: 1; margin-bottom: 0; }
     .section-status { float: right; }
@@ -1029,10 +1029,13 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
   </div>
 
   <div class="card">
-    <h2>Cyrus Logs</h2>
+    <h2>Cyrus Logs <span id="logStreamStatus" style="font-size: 12px; color: #666;"></span></h2>
     <pre id="cyrusLogs" class="log-output">Loading...</pre>
-    <button onclick="refreshLogs()">Refresh Logs</button>
+    <button onclick="refreshLogs()">Refresh</button>
     <button class="secondary" onclick="copyToClipboard('cyrusLogs')">Copy</button>
+    <label style="margin-left: 16px; font-size: 13px; cursor: pointer;">
+      <input type="checkbox" id="autoRefreshLogs" onchange="toggleLogStream()" checked> Auto-refresh
+    </label>
   </div>
 
   <div class="grid">
@@ -1234,17 +1237,33 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     }
 
     // Logs
+    let logStreamInterval = null;
     async function refreshLogs() {
       try {
         const res = await fetch(apiBase('/api/exec'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: 'tail -30 /var/log/cyrus.log 2>/dev/null || echo "No logs available"' })
+          body: JSON.stringify({ command: 'tail -50 /var/log/cyrus.log 2>/dev/null || echo "No logs available"' })
         });
         const data = await res.json();
-        document.getElementById('cyrusLogs').textContent = data.stdout || 'No logs';
+        const logsEl = document.getElementById('cyrusLogs');
+        logsEl.textContent = data.stdout || 'No logs';
+        logsEl.scrollTop = logsEl.scrollHeight; // Auto-scroll to bottom
       } catch (e) {
         document.getElementById('cyrusLogs').textContent = 'Error loading logs';
+      }
+    }
+
+    function toggleLogStream() {
+      const checkbox = document.getElementById('autoRefreshLogs');
+      const status = document.getElementById('logStreamStatus');
+      if (checkbox.checked) {
+        logStreamInterval = setInterval(refreshLogs, 3000);
+        status.textContent = '(streaming)';
+      } else {
+        clearInterval(logStreamInterval);
+        logStreamInterval = null;
+        status.textContent = '';
       }
     }
 
@@ -1295,6 +1314,7 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     refreshCyrusStatus();
     refreshContainer();
     refreshLogs();
+    toggleLogStream(); // Start auto-refresh since checkbox is checked by default
   </script>
 </body>
 </html>`;
