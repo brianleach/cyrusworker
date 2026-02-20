@@ -280,6 +280,10 @@ curl -s -H "Authorization: Bearer YOUR_TOKEN_HERE" https://api.linear.app/graphq
 - Check the repository URL is correct (HTTPS format)
 - View logs in Admin UI for detailed error messages
 
+## Contact
+
+Questions or feedback? Reach me on [LinkedIn](https://www.linkedin.com/in/bleach/) or email bleach@gmail.com
+
 ## License
 
 MIT
