@@ -255,7 +255,7 @@ This usually means the OAuth token in Cyrus's config is stale. To fix:
 
 You can verify the token is working by running this in Execute:
 ```bash
-cat /root/.cyrus/config.json | grep linearToken
+cat /root/.cyrus/config.json | grep -A3 linearWorkspaces
 ```
 Then test it:
 ```bash

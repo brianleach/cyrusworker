@@ -14,16 +14,16 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI and pnpm
+# Install Claude Code CLI and pnpm (pnpm is for cloned target repos, not Cyrus)
 RUN npm install -g @anthropic-ai/claude-code pnpm
 
-# Install Cyrus from source (pnpm monorepo)
-RUN git clone --depth 1 https://github.com/ceedaragents/cyrus.git /opt/cyrus \
-    && cd /opt/cyrus \
-    && pnpm install --ignore-scripts \
-    && pnpm build \
-    && ln -s /opt/cyrus/apps/cli/dist/src/app.js /usr/local/bin/cyrus \
-    && chmod +x /opt/cyrus/apps/cli/dist/src/app.js
+# Install Cyrus from npm at an exact version.
+# Pinned deliberately: the Worker shells out to `cyrus <subcommand>` (see
+# /api/add-repo), so a floating install lets an upstream rename break this
+# Worker with no change here. Bump this pin explicitly and verify the
+# subcommands the Worker calls still exist.
+RUN npm install -g cyrus-ai@0.2.68 \
+    && cyrus --version
 
 # Create working directories
 RUN mkdir -p /root/.cyrus /data/repos /data/worktrees /data/backup
