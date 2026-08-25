@@ -42,7 +42,7 @@ CyrusWorker runs Cyrus Community Edition (Claude Code-powered Linear agent) on C
 3. Worker verifies signature using `LINEAR_WEBHOOK_SECRET`
 4. Worker checks if Cyrus is running (health check to port 3456)
 5. If Cyrus is not running, Worker auto-bootstraps (restore from R2, clone repos, start Cyrus)
-6. Worker forwards webhook to Cyrus EdgeWorker at `localhost:3456/webhook`
+6. Worker forwards webhook to Cyrus EdgeWorker at `localhost:3456/linear-webhook`
 7. Cyrus processes the issue using Claude Code and responds in Linear
 
 ### API Routes

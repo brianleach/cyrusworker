@@ -593,7 +593,7 @@ async function processWebhookInBackground(
 
     // Forward webhook to Cyrus running on port 3456 inside the container
     const forwardResult = await sandbox.exec(
-      `curl -s -X POST http://localhost:3456/webhook -H "Content-Type: application/json" -H "linear-signature: ${signature}" -d '${body.replace(/'/g, "'\\''")}'`
+      `curl -s -X POST http://localhost:3456/linear-webhook -H "Content-Type: application/json" -H "linear-signature: ${signature}" -d '${body.replace(/'/g, "'\\''")}'`
     );
 
     if (forwardResult.success) {

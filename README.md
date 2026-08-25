@@ -118,7 +118,7 @@ In Linear, open any issue and click **Delegate to... → Cyrus**. Cyrus will pro
 1. User **delegates** an issue to Cyrus or **@mentions** it in a comment
 2. Linear sends an `AgentSessionEvent` webhook to your worker
 3. Worker checks if Cyrus is running; if not, **auto-bootstraps** (restores config from R2, clones repos, starts Cyrus)
-4. Worker forwards the webhook to Cyrus EdgeWorker (port 3456)
+4. Worker forwards the webhook to Cyrus EdgeWorker at `localhost:3456/linear-webhook`
 5. Cyrus processes the issue using Claude Code
 6. Results are posted back to Linear
 
