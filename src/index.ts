@@ -593,6 +593,11 @@ async function runBootstrap(
     `CYRUS_BASE_URL=${baseUrl}`,
     "CYRUS_SERVER_PORT=3456",
     "CYRUS_HOST_EXTERNAL=true",
+    // Cyrus >=0.2.68 validates webhook source IPs when CYRUS_HOST_EXTERNAL is set.
+    // Webhooks reach Cyrus from this Worker over localhost, so every one would be
+    // rejected as "unauthorized IP: 127.0.0.1". The Worker already verifies the
+    // Linear HMAC signature before forwarding, so the check is redundant here.
+    "WEBHOOK_IP_VALIDATION=false",
     "",
     "# Linear OAuth",
     `LINEAR_CLIENT_ID=${env.LINEAR_CLIENT_ID || ""}`,
@@ -959,6 +964,8 @@ async function handleApiRoutes(
       `CYRUS_BASE_URL=${baseUrl}`,
       "CYRUS_SERVER_PORT=3456",
       "CYRUS_HOST_EXTERNAL=true",
+      // See runBootstrap(): required for Worker-forwarded webhooks on Cyrus >=0.2.68
+      "WEBHOOK_IP_VALIDATION=false",
       "",
       "# Linear OAuth",
       `LINEAR_CLIENT_ID=${env.LINEAR_CLIENT_ID || ""}`,
