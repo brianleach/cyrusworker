@@ -1,6 +1,6 @@
 # Contributing to CyrusWorker
 
-Thank you for your interest in contributing to CyrusWorker! This project runs [Cyrus Community Edition](https://github.com/ceedaragents/cyrus) on Cloudflare's edge infrastructure.
+Thank you for your interest in contributing to CyrusWorker! This project runs [Cyrus Community Edition](https://github.com/cyrusagents/cyrus) on Cloudflare's edge infrastructure.
 
 ## Getting Started
 
@@ -54,7 +54,7 @@ npm run tail         # Tail production logs
 
 ## Related Projects
 
-- [Cyrus Community Edition](https://github.com/ceedaragents/cyrus) - The Claude Code-powered Linear agent that runs inside CyrusWorker
+- [Cyrus Community Edition](https://github.com/cyrusagents/cyrus) - The Claude Code-powered Linear agent that runs inside CyrusWorker
 - [Moltworker](https://github.com/cloudflare/moltworker) - Inspiration for running AI agents on Cloudflare Sandbox
 
 ## License

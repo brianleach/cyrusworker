@@ -4,7 +4,7 @@
 
 # CyrusWorker
 
-Run [Cyrus Community Edition](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
+Run [Cyrus Community Edition](https://github.com/cyrusagents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
 
 Inspired by [Moltworker](https://github.com/cloudflare/moltworker).
 

@@ -25,7 +25,7 @@ CyrusWorker runs Cyrus Community Edition (Claude Code-powered Linear agent) on C
 - `/api/*` - Internal API routes (bootstrap, status, config, repos, storage)
 
 **Sandbox Container (Dockerfile)** - Runs in Cloudflare Containers with:
-- Node.js 22, git, GitHub CLI
+- Node.js (20 in the `cloudflare/sandbox` base image; 22 in `Dockerfile.local`), git, GitHub CLI
 - Claude Code CLI (`@anthropic-ai/claude-code`)
 - Cyrus Community Edition from npm (`cyrus-ai`), pinned to an exact version in the Dockerfile
 - Working directories: `/root/.cyrus/repos`, `/root/.cyrus/worktrees`
@@ -183,7 +183,7 @@ This follows the serverless model - the container sleeps when idle and wakes up 
 
 ## Cyrus Source
 
-**IMPORTANT**: Cyrus is published to npm as [`cyrus-ai`](https://www.npmjs.com/package/cyrus-ai) (source: https://github.com/ceedaragents/cyrus)
+**IMPORTANT**: Cyrus is published to npm as [`cyrus-ai`](https://www.npmjs.com/package/cyrus-ai) (source: https://github.com/cyrusagents/cyrus, formerly `ceedaragents/cyrus`; the old URL redirects)
 
 - Installed via `npm install -g cyrus-ai@<version>` in the Dockerfile, **pinned to an exact version**
 - Keep the pin. The Worker shells out to `cyrus <subcommand>`, so a floating
