@@ -25,9 +25,9 @@ CyrusWorker runs Cyrus Community Edition (Claude Code-powered Linear agent) on C
 - `/api/*` - Internal API routes (bootstrap, status, config, repos, storage)
 
 **Sandbox Container (Dockerfile)** - Runs in Cloudflare Containers with:
-- Node.js 22, git, GitHub CLI
+- Node.js (20 in the `cloudflare/sandbox` base image; 22 in `Dockerfile.local`), git, GitHub CLI
 - Claude Code CLI (`@anthropic-ai/claude-code`)
-- Cyrus Community Edition from [ceedaragents/cyrus](https://github.com/ceedaragents/cyrus) (pnpm monorepo)
+- Cyrus Community Edition from npm (`cyrus-ai`), pinned to an exact version in the Dockerfile
 - Working directories: `/root/.cyrus/repos`, `/root/.cyrus/worktrees`
 
 **Cyrus EdgeWorker** - Runs inside the container on port 3456:
@@ -55,9 +55,13 @@ CyrusWorker runs Cyrus Community Edition (Claude Code-powered Linear agent) on C
 | `/api/bootstrap` | POST | Full bootstrap: restore config, clone repos, start Cyrus |
 | `/api/status` | GET | Sandbox process and disk status |
 | `/api/config` | GET | Current Cyrus config JSON |
+| `/api/version` | GET | Installed `cyrus` CLI version (works while Cyrus is offline) |
 | `/api/init` | POST | Initialize Cyrus .env file from Worker secrets |
 | `/api/start` | POST | Start Cyrus EdgeWorker |
-| `/api/add-repo` | POST | Add repository to Cyrus (JSON body: `{url: string, workspace?: string}`) |
+| `/api/workspaces` | GET | Authorized Linear workspaces (id + name) from R2 |
+| `/api/add-repo` | POST | Add repository to Cyrus (JSON body: `{url: string, workspace?: string}`); resolves the workspace Worker-side, 400s on ambiguity |
+| `/api/refresh-token` | POST | Refresh every workspace's OAuth token and sync into config.json |
+| `/api/sync-tokens` | POST | Sync stored credentials into `config.linearWorkspaces` |
 | `/api/restore` | POST | Restore config/tokens from R2 to sandbox |
 | `/api/save` | POST | Save config/tokens from sandbox to R2 |
 | `/api/restart` | POST | Restart container processes |
@@ -75,8 +79,8 @@ config/
   .env             # Environment variables
   repo-urls.json   # Clone URLs for auto-restore
 tokens/
-  {orgId}.json     # OAuth tokens by organization
-  latest.json      # Most recent OAuth token
+  {orgId}.json     # OAuth tokens by organization (source of truth)
+  latest.json      # Most recent OAuth token (duplicate of one of the above)
 backups/
   latest.tar.gz    # Full ~/.cyrus backup
   {timestamp}.tar.gz
@@ -128,8 +132,11 @@ When working on this codebase, avoid adding logging that could capture issue tit
 
 - `runBootstrap()` - Full bootstrap sequence: kill Cyrus, restore from R2, init env, clone repos, start Cyrus
 - `handleAgentSessionWebhook()` - Receives webhooks, auto-bootstraps if needed, forwards to Cyrus
-- `restoreConfigFromR2()` - Restores config.json, .env, tokens from R2 to sandbox
-- `saveConfigToR2()` - Saves config.json, .env, tokens, repo URLs from sandbox to R2
+- `restoreConfigFromR2()` - Restores config.json and .env from R2 to sandbox
+- `saveConfigToR2()` - Saves config.json, .env, repo URLs from sandbox to R2
+- `syncConfigCredentials()` - Writes stored Linear tokens into `config.linearWorkspaces` (the only place Cyrus reads them)
+- `refreshOAuthTokensIfNeeded()` - Refreshes every org's OAuth token that is expiring
+- `writeSandboxFile()` - base64 file write; use for anything containing secrets
 - `cloneMissingRepos()` - Clones repositories that exist in config but not on disk
 - `handleOAuthCallback()` - Exchanges OAuth code for tokens, stores in R2
 - `handleAdminUI()` - Returns admin dashboard HTML
@@ -176,23 +183,48 @@ This follows the serverless model - the container sleeps when idle and wakes up 
 
 ## Cyrus Source
 
-**IMPORTANT**: Cyrus is from https://github.com/ceedaragents/cyrus
+**IMPORTANT**: Cyrus is published to npm as [`cyrus-ai`](https://www.npmjs.com/package/cyrus-ai) (source: https://github.com/cyrusagents/cyrus, formerly `ceedaragents/cyrus`; the old URL redirects)
 
-- It's a **pnpm monorepo** - must use `pnpm install && pnpm build`
-- CLI is at `apps/cli` with binary at `dist/src/app.js`
+- Installed via `npm install -g cyrus-ai@<version>` in the Dockerfile, **pinned to an exact version**
+- Keep the pin. The Worker shells out to `cyrus <subcommand>`, so a floating
+  install lets an upstream rename break this Worker with no change here. That
+  already happened once: `cyrus self-auth` was renamed `self-auth-linear`.
+- When bumping the pin, verify the subcommands the Worker calls still exist
+  (`cyrus self-add-repo`, `cyrus start`) and that the config schema below is unchanged.
 - Runs as an EdgeWorker server to receive webhooks and process issues via Claude Code
-- Config format expects Linear tokens embedded in repositories array:
-  ```json
-  {
-    "repositories": [{
-      "name": "repo-name",
-      "repositoryPath": "/root/.cyrus/repos/repo-name",
-      "linearWorkspaceId": "...",
-      "linearWorkspaceName": "...",
-      "linearToken": "lin_oauth_..."
-    }]
-  }
-  ```
+
+### Config format
+
+Cyrus reads Linear credentials **only** from `linearWorkspaces`, keyed by Linear
+organization id. A config with no repositories therefore has no credentials
+unless `linearWorkspaces` is written explicitly - `cyrus self-add-repo` requires
+at least one workspace to exist before it will add anything.
+
+Per-repository `linearToken` is a legacy format. Cyrus migrates it into
+`linearWorkspaces` on read and ignores it once `linearWorkspaces` is present, so
+writing repo-level tokens does not refresh anything.
+
+```json
+{
+  "linearWorkspaces": {
+    "<linear-org-id>": {
+      "linearToken": "lin_oauth_...",
+      "linearRefreshToken": "...",
+      "linearWorkspaceName": "Acme"
+    }
+  },
+  "repositories": [{
+    "name": "repo-name",
+    "repositoryPath": "/root/.cyrus/repos/repo-name",
+    "linearWorkspaceId": "<linear-org-id>"
+  }]
+}
+```
+
+`cyrus self-add-repo` prompts on stdin when more than one workspace exists and no
+workspace name is given. There is no TTY under `sandbox.exec`, so that prompt
+hangs the exec - `/api/add-repo` always resolves the workspace itself and passes
+it positionally.
 
 ## Known TODOs
 

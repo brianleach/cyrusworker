@@ -4,7 +4,7 @@
 
 # CyrusWorker
 
-Run [Cyrus Community Edition](https://github.com/ceedaragents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
+Run [Cyrus Community Edition](https://github.com/cyrusagents/cyrus) (Claude Code-powered Linear agent) on Cloudflare's edge infrastructure using the Sandbox SDK.
 
 Inspired by [Moltworker](https://github.com/cloudflare/moltworker).
 
@@ -109,6 +109,11 @@ curl -X POST "https://your-worker.workers.dev/api/add-repo?token=YOUR_GATEWAY_TO
   -d '{"url": "https://github.com/your-org/your-repo.git"}'
 ```
 
+If you have authorized more than one Linear workspace, pass `workspace` with the
+workspace name as well; the request returns 400 with the list of authorized
+names if it is ambiguous. `GET /api/workspaces` lists them, and the Admin UI's
+Add Repository form offers them as a dropdown.
+
 ### Step 5: Delegate an Issue
 
 In Linear, open any issue and click **Delegate to... → Cyrus**. Cyrus will process the issue using Claude Code.
@@ -152,9 +157,12 @@ All `/api/*` endpoints require the `GATEWAY_TOKEN` query parameter (e.g., `/api/
 | `/api/bootstrap` | POST | Full bootstrap: restore, clone repos, start Cyrus |
 | `/api/status` | GET | Sandbox process and disk status |
 | `/api/config` | GET | Current Cyrus config |
+| `/api/version` | GET | Installed `cyrus` CLI version |
 | `/api/init` | POST | Initialize Cyrus .env from Worker secrets |
 | `/api/start` | POST | Start Cyrus EdgeWorker |
+| `/api/workspaces` | GET | Authorized Linear workspaces |
 | `/api/add-repo` | POST | Add repository (`{url, workspace?}`) |
+| `/api/refresh-token` | POST | Refresh Linear OAuth tokens and sync them into Cyrus |
 | `/api/restore` | POST | Restore config from R2 |
 | `/api/save` | POST | Save config to R2 |
 | `/api/exec` | POST | Execute command in sandbox |
@@ -236,6 +244,14 @@ npm run dev
 
 ## Architecture
 
+### Cyrus version
+
+The container installs Cyrus from npm (`cyrus-ai`) at an exact version pinned in
+the `Dockerfile`. Keep it pinned: the Worker shells out to `cyrus <subcommand>`,
+so a floating install lets an upstream rename break the Worker with no change
+here. When bumping it, rebuild the image and confirm `/api/version` reports the
+new version.
+
 See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
 
 ## Troubleshooting
@@ -246,6 +262,29 @@ See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
 - Ensure you completed the OAuth authorization flow
 - Check that the webhook URL is correct and responding
 
+### Adding a repository fails with "No Linear credentials found"
+
+Full error: `[ERROR] [CLI] No Linear credentials found. Run 'cyrus self-auth' first.`
+(newer Cyrus versions say `self-auth-linear`).
+
+Cyrus reads Linear credentials only from the `linearWorkspaces` block of
+`/root/.cyrus/config.json`. If that block is missing, `cyrus self-add-repo` has
+no workspace to attach a repository to. Do **not** run `cyrus self-auth-linear`
+in the container - it is an interactive browser flow and cannot complete there.
+
+1. Confirm OAuth is done: the Admin UI's Repositories card and `/api/workspaces`
+   should list your workspace. If not, click **Reauthorize**.
+2. Click **Bootstrap** (or `POST /api/sync-tokens`) to write the credentials into
+   `config.json`.
+3. Verify, then retry Add Repository:
+   ```bash
+   cat /root/.cyrus/config.json | grep -A3 linearWorkspaces
+   ```
+
+If `/api/workspaces` lists a workspace but the block is still empty after
+bootstrap, check that `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` are set -
+token refresh is skipped without them.
+
 ### Linear says "did not respond" or Cyrus fails to fetch issue details
 
 This usually means the OAuth token in Cyrus's config is stale. To fix:
@@ -255,7 +294,7 @@ This usually means the OAuth token in Cyrus's config is stale. To fix:
 
 You can verify the token is working by running this in Execute:
 ```bash
-cat /root/.cyrus/config.json | grep linearToken
+cat /root/.cyrus/config.json | grep -A3 linearWorkspaces
 ```
 Then test it:
 ```bash

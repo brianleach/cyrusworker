@@ -46,57 +46,82 @@ interface AgentSessionWebhookPayload {
   };
 }
 
-// Get OAuth token data from R2
-async function getOAuthTokenFromR2(env: Env): Promise<{
+interface StoredOAuthToken {
   access_token: string;
   organization_id: string;
   organization_name: string;
   refresh_token?: string;
   created_at?: number;
   expires_in?: number;
-} | null> {
-  try {
-    const tokenObj = await env.CYRUS_STORAGE.get("tokens/latest.json");
-    if (!tokenObj) return null;
-
-    return JSON.parse(await tokenObj.text());
-  } catch (error) {
-    console.error("Failed to get token from R2:", error);
-    return null;
-  }
 }
 
-// Refresh OAuth token if expired or about to expire
-async function refreshOAuthTokenIfNeeded(env: Env): Promise<{
-  refreshed: boolean;
-  access_token?: string;
-  error?: string;
-}> {
-  const tokenData = await getOAuthTokenFromR2(env);
-  if (!tokenData) {
-    return { refreshed: false, error: "No token found" };
+// Linear workspace credentials as Cyrus stores them in config.json.
+// Cyrus reads credentials ONLY from config.linearWorkspaces (keyed by Linear
+// organization id). The legacy per-repository `linearToken` field is migrated
+// into this shape on read, so a config with no repositories has no credentials
+// at all - which is why `cyrus self-add-repo` used to fail with
+// "No Linear credentials found" on a fresh install.
+interface LinearWorkspaceCredentials {
+  linearToken: string;
+  linearRefreshToken?: string;
+  linearWorkspaceName?: string;
+  linearWorkspaceSlug?: string;
+}
+
+// Get every stored OAuth token, one per Linear organization.
+// `tokens/latest.json` is a duplicate of one of the per-org files, so keying by
+// organization_id dedupes it for free; the freshest record wins.
+async function getAllOAuthTokensFromR2(env: Env): Promise<StoredOAuthToken[]> {
+  const byOrg = new Map<string, StoredOAuthToken>();
+
+  try {
+    const list = await env.CYRUS_STORAGE.list({ prefix: "tokens/" });
+    for (const obj of list.objects) {
+      const tokenObj = await env.CYRUS_STORAGE.get(obj.key);
+      if (!tokenObj) continue;
+      try {
+        const token = JSON.parse(await tokenObj.text()) as StoredOAuthToken;
+        if (!token.access_token || !token.organization_id) continue;
+        const existing = byOrg.get(token.organization_id);
+        if (!existing || (token.created_at || 0) >= (existing.created_at || 0)) {
+          byOrg.set(token.organization_id, token);
+        }
+      } catch {
+        // Skip unparseable token files
+      }
+    }
+  } catch (error) {
+    console.error("Failed to list tokens from R2:", error);
   }
 
-  // Check if token is expired or will expire in next 5 minutes
-  const now = Date.now();
-  const expiresAt = (tokenData.created_at || 0) + ((tokenData.expires_in || 86400) * 1000);
-  const fiveMinutes = 5 * 60 * 1000;
+  return Array.from(byOrg.values());
+}
 
-  if (now < expiresAt - fiveMinutes) {
-    // Token is still valid
-    return { refreshed: false, access_token: tokenData.access_token };
+// Persist a token record to both its per-org key and tokens/latest.json
+async function putOAuthToken(env: Env, token: StoredOAuthToken): Promise<void> {
+  const body = JSON.stringify(token, null, 2);
+  await env.CYRUS_STORAGE.put(`tokens/${token.organization_id}.json`, body);
+  await env.CYRUS_STORAGE.put("tokens/latest.json", body);
+}
+
+function isTokenExpiring(token: StoredOAuthToken): boolean {
+  // Treat a token as expiring if it lapses within 5 minutes
+  const expiresAt = (token.created_at || 0) + ((token.expires_in || 86400) * 1000);
+  return Date.now() >= expiresAt - 5 * 60 * 1000;
+}
+
+// Refresh a single org's token against Linear. Returns the updated record, or
+// null with a reason when the refresh could not be performed.
+async function refreshToken(
+  env: Env,
+  token: StoredOAuthToken
+): Promise<{ token?: StoredOAuthToken; error?: string }> {
+  if (!token.refresh_token) {
+    return { error: "Token expired and no refresh token available" };
   }
-
-  // Token is expired or about to expire - try to refresh
-  if (!tokenData.refresh_token) {
-    return { refreshed: false, error: "Token expired and no refresh token available" };
-  }
-
   if (!env.LINEAR_CLIENT_ID || !env.LINEAR_CLIENT_SECRET) {
-    return { refreshed: false, error: "Missing OAuth credentials for refresh" };
+    return { error: "Missing OAuth credentials for refresh (LINEAR_CLIENT_ID / LINEAR_CLIENT_SECRET)" };
   }
-
-  console.log("Refreshing expired OAuth token...");
 
   try {
     const refreshResponse = await fetch("https://api.linear.app/oauth/token", {
@@ -108,14 +133,14 @@ async function refreshOAuthTokenIfNeeded(env: Env): Promise<{
         grant_type: "refresh_token",
         client_id: env.LINEAR_CLIENT_ID,
         client_secret: env.LINEAR_CLIENT_SECRET,
-        refresh_token: tokenData.refresh_token,
+        refresh_token: token.refresh_token,
       }),
     });
 
     if (!refreshResponse.ok) {
       const errorText = await refreshResponse.text();
       console.error("Token refresh failed:", errorText);
-      return { refreshed: false, error: `Refresh failed: ${refreshResponse.status}` };
+      return { error: `Refresh failed: ${refreshResponse.status}` };
     }
 
     const newTokens = await refreshResponse.json() as {
@@ -126,39 +151,88 @@ async function refreshOAuthTokenIfNeeded(env: Env): Promise<{
       refresh_token?: string;
     };
 
-    // Update stored tokens
-    const updatedTokenData = {
-      ...tokenData,
+    const updated: StoredOAuthToken = {
+      ...token,
       access_token: newTokens.access_token,
       expires_in: newTokens.expires_in,
-      refresh_token: newTokens.refresh_token || tokenData.refresh_token,
+      refresh_token: newTokens.refresh_token || token.refresh_token,
       created_at: Date.now(),
     };
 
-    await env.CYRUS_STORAGE.put(
-      `tokens/${tokenData.organization_id}.json`,
-      JSON.stringify(updatedTokenData, null, 2)
-    );
-    await env.CYRUS_STORAGE.put(
-      "tokens/latest.json",
-      JSON.stringify(updatedTokenData, null, 2)
-    );
-
-    console.log("OAuth token refreshed successfully");
-    return { refreshed: true, access_token: newTokens.access_token };
+    await putOAuthToken(env, updated);
+    console.log("OAuth token refreshed successfully for org:", token.organization_id);
+    return { token: updated };
   } catch (error) {
     console.error("Token refresh error:", error);
-    return { refreshed: false, error: String(error) };
+    return { error: String(error) };
   }
 }
 
-// Build Cyrus config.json - returns empty config (repos added via cyrus self-add-repo)
-// Note: We don't create incomplete repository entries that lack name/repositoryPath
-// Those cause Cyrus EdgeWorker to fail with "Cannot read properties of undefined"
-async function buildCyrusConfigFromTokens(_env: Env): Promise<{ config: object } | null> {
-  // Return empty repositories array - actual repos get added via cyrus self-add-repo
-  // which properly sets all required fields (name, repositoryPath, linearToken, etc.)
-  return { config: { repositories: [] } };
+// Refresh every stored org token that is expired or about to expire.
+// Returns the current valid token for each org, so callers can sync config.
+async function refreshOAuthTokensIfNeeded(env: Env): Promise<{
+  tokens: StoredOAuthToken[];
+  refreshed: string[];
+  errors: string[];
+}> {
+  const stored = await getAllOAuthTokensFromR2(env);
+  if (stored.length === 0) {
+    return { tokens: [], refreshed: [], errors: ["No token found"] };
+  }
+
+  const tokens: StoredOAuthToken[] = [];
+  const refreshed: string[] = [];
+  const errors: string[] = [];
+
+  for (const token of stored) {
+    if (!isTokenExpiring(token)) {
+      tokens.push(token);
+      continue;
+    }
+
+    console.log("Refreshing expired OAuth token for org:", token.organization_id);
+    const result = await refreshToken(env, token);
+    if (result.token) {
+      tokens.push(result.token);
+      refreshed.push(token.organization_name || token.organization_id);
+    } else {
+      // Keep the stale token: it may still work, and dropping it here would
+      // silently strip the workspace out of config.json.
+      tokens.push(token);
+      errors.push(`${token.organization_name || token.organization_id}: ${result.error}`);
+    }
+  }
+
+  return { tokens, refreshed, errors };
+}
+
+// Build the linearWorkspaces block Cyrus actually reads, from stored tokens
+function buildLinearWorkspaces(
+  tokens: StoredOAuthToken[]
+): Record<string, LinearWorkspaceCredentials> {
+  const workspaces: Record<string, LinearWorkspaceCredentials> = {};
+  for (const token of tokens) {
+    workspaces[token.organization_id] = {
+      linearToken: token.access_token,
+      ...(token.refresh_token ? { linearRefreshToken: token.refresh_token } : {}),
+      ...(token.organization_name ? { linearWorkspaceName: token.organization_name } : {}),
+    };
+  }
+  return workspaces;
+}
+
+// Build a fresh Cyrus config.json.
+// Repositories are added later by `cyrus self-add-repo` (it sets name,
+// repositoryPath, routing labels, etc.), but the credentials must be present
+// up front or that command has no workspace to attach a repo to.
+async function buildCyrusConfigFromTokens(env: Env): Promise<{ config: object } | null> {
+  const tokens = await getAllOAuthTokensFromR2(env);
+  return {
+    config: {
+      repositories: [],
+      linearWorkspaces: buildLinearWorkspaces(tokens),
+    },
+  };
 }
 
 // Helper to restore Cyrus config from R2 to sandbox
@@ -173,16 +247,14 @@ async function restoreConfigFromR2(
     const configObj = await env.CYRUS_STORAGE.get("config/config.json");
     if (configObj) {
       const config = await configObj.text();
-      const b64 = btoa(config);
-      await sandbox.exec(`mkdir -p /root/.cyrus && echo ${b64} | base64 -d > /root/.cyrus/config.json`);
+      await writeSandboxFile(sandbox, "/root/.cyrus/config.json", config);
       files.push("config.json");
     } else {
       // No saved config - build from OAuth tokens
       const result = await buildCyrusConfigFromTokens(env);
       if (result) {
         const configJson = JSON.stringify(result.config, null, 2);
-        const b64 = btoa(configJson);
-        await sandbox.exec(`mkdir -p /root/.cyrus && echo ${b64} | base64 -d > /root/.cyrus/config.json`);
+        await writeSandboxFile(sandbox, "/root/.cyrus/config.json", configJson);
         files.push("config.json (built from tokens)");
       }
     }
@@ -191,23 +263,14 @@ async function restoreConfigFromR2(
     const envObj = await env.CYRUS_STORAGE.get("config/.env");
     if (envObj) {
       const envContent = await envObj.text();
-      const b64 = btoa(envContent);
-      await sandbox.exec(`mkdir -p /root/.cyrus && echo ${b64} | base64 -d > /root/.cyrus/.env`);
+      await writeSandboxFile(sandbox, "/root/.cyrus/.env", envContent);
       files.push(".env");
     }
 
-    // Restore tokens (for backup purposes, though Cyrus uses config.json)
-    const tokenList = await env.CYRUS_STORAGE.list({ prefix: "tokens/" });
-    for (const obj of tokenList.objects) {
-      const tokenObj = await env.CYRUS_STORAGE.get(obj.key);
-      if (tokenObj) {
-        const tokenContent = await tokenObj.text();
-        const filename = obj.key.replace("tokens/", "");
-        const b64 = btoa(tokenContent);
-        await sandbox.exec(`mkdir -p /root/.cyrus/tokens && echo ${b64} | base64 -d > /root/.cyrus/tokens/${filename}`);
-        files.push(`tokens/${filename}`);
-      }
-    }
+    // Credentials are NOT restored as files: Cyrus reads them from
+    // config.linearWorkspaces, which syncConfigCredentials() writes during
+    // bootstrap. Copying them to ~/.cyrus/tokens/ only parked unused secrets in
+    // the container.
 
     return { restored: files.length > 0, files };
   } catch (error) {
@@ -264,18 +327,9 @@ async function saveConfigToR2(
       files.push(".env");
     }
 
-    // Save tokens
-    const tokensResult = await sandbox.exec("ls /root/.cyrus/tokens/ 2>/dev/null || echo ''");
-    if (tokensResult.stdout && tokensResult.stdout.trim()) {
-      const tokenFiles = tokensResult.stdout.trim().split("\n").filter(f => f);
-      for (const tokenFile of tokenFiles) {
-        const tokenContent = await sandbox.exec(`cat /root/.cyrus/tokens/${tokenFile}`);
-        if (tokenContent.stdout) {
-          await env.CYRUS_STORAGE.put(`tokens/${tokenFile}`, tokenContent.stdout);
-          files.push(`tokens/${tokenFile}`);
-        }
-      }
-    }
+    // Tokens are not read back from the sandbox: R2 is the source of truth for
+    // them (written by /callback and by token refresh), and the sandbox copy was
+    // never authoritative.
 
     return { saved: files.length > 0, files };
   } catch (error) {
@@ -416,30 +470,77 @@ export default {
   },
 };
 
-// Helper to update linearToken in config.json for all repositories
-async function updateConfigTokens(
+// Write a file into the sandbox without shell-quoting hazards.
+// Secrets and config JSON go through base64 so a `%`, quote, or newline in a
+// value cannot corrupt the file (or leak into the process list).
+async function writeSandboxFile(
   sandbox: ReturnType<typeof getSandbox>,
-  newToken: string
-): Promise<boolean> {
+  path: string,
+  contents: string
+): Promise<void> {
+  const bytes = new TextEncoder().encode(contents);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const b64 = btoa(binary);
+  const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+  await sandbox.exec(`mkdir -p ${dir} && echo ${b64} | base64 -d > ${path}`);
+}
+
+// Read the sandbox's config.json, tolerating a missing or corrupt file
+async function readSandboxConfig(
+  sandbox: ReturnType<typeof getSandbox>
+): Promise<Record<string, unknown>> {
+  const result = await sandbox.exec("cat /root/.cyrus/config.json 2>/dev/null || echo '{}'");
   try {
-    const configResult = await sandbox.exec("cat /root/.cyrus/config.json 2>/dev/null || echo '{}'");
-    if (!configResult.stdout || configResult.stdout.trim() === '{}') return false;
+    const parsed = JSON.parse(result.stdout || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
 
-    const config = JSON.parse(configResult.stdout) as { repositories?: Array<{ linearToken?: string }> };
-    if (!config.repositories || config.repositories.length === 0) return false;
+// Sync stored Linear credentials into config.json's linearWorkspaces block.
+//
+// This is the fix for "No Linear credentials found. Run 'cyrus self-auth-linear'
+// first." - Cyrus reads credentials from config.linearWorkspaces, and nothing
+// used to write that block. Runs on every bootstrap so a rotated token reaches
+// Cyrus even after Cyrus itself has rewritten the config.
+async function syncConfigCredentials(
+  sandbox: ReturnType<typeof getSandbox>,
+  tokens: StoredOAuthToken[]
+): Promise<{ synced: number }> {
+  if (tokens.length === 0) return { synced: 0 };
 
-    // Update all repositories with new token
-    for (const repo of config.repositories) {
-      repo.linearToken = newToken;
+  try {
+    const config = await readSandboxConfig(sandbox);
+    if (!Array.isArray(config.repositories)) {
+      config.repositories = [];
     }
 
-    const updatedConfig = JSON.stringify(config, null, 2);
-    const b64 = btoa(updatedConfig);
-    await sandbox.exec(`echo ${b64} | base64 -d > /root/.cyrus/config.json`);
-    return true;
+    const existing = (config.linearWorkspaces || {}) as Record<string, LinearWorkspaceCredentials>;
+    const fresh = buildLinearWorkspaces(tokens);
+
+    for (const [orgId, creds] of Object.entries(fresh)) {
+      // Preserve fields Cyrus owns (e.g. linearWorkspaceSlug) and overwrite the token
+      existing[orgId] = { ...existing[orgId], ...creds };
+    }
+    config.linearWorkspaces = existing;
+
+    // Drop legacy per-repository tokens now that the workspace block owns them.
+    // Cyrus ignores repo-level tokens once linearWorkspaces exists, so leaving
+    // them behind just parks a stale secret in the config (and in R2).
+    for (const repo of config.repositories as Array<Record<string, unknown>>) {
+      const wsId = repo.linearWorkspaceId as string | undefined;
+      if (wsId && existing[wsId] && "linearToken" in repo) {
+        delete repo.linearToken;
+      }
+    }
+
+    await writeSandboxFile(sandbox, "/root/.cyrus/config.json", JSON.stringify(config, null, 2));
+    return { synced: Object.keys(fresh).length };
   } catch (error) {
-    console.error("Failed to update config tokens:", error);
-    return false;
+    console.error("Failed to sync config credentials:", error);
+    return { synced: 0 };
   }
 }
 
@@ -451,14 +552,14 @@ async function runBootstrap(
 ): Promise<string[]> {
   const steps: string[] = [];
 
-  // Refresh OAuth token if needed (before anything else)
-  const refreshResult = await refreshOAuthTokenIfNeeded(env);
-  if (refreshResult.error) {
-    steps.push(`token: ${refreshResult.error}`);
-  } else if (refreshResult.refreshed) {
-    steps.push("token: refreshed");
+  // Refresh OAuth tokens if needed (before anything else), for every org
+  const refreshResult = await refreshOAuthTokensIfNeeded(env);
+  if (refreshResult.errors.length > 0) {
+    steps.push(`token: ${refreshResult.errors.join("; ")}`);
+  } else if (refreshResult.refreshed.length > 0) {
+    steps.push(`token: refreshed (${refreshResult.refreshed.join(", ")})`);
   } else {
-    steps.push("token: valid");
+    steps.push(`token: valid (${refreshResult.tokens.length} workspace(s))`);
   }
 
   // Kill any existing Cyrus to prevent config overwrite
@@ -469,17 +570,16 @@ async function runBootstrap(
   const restoreResult = await restoreConfigFromR2(sandbox, env);
   steps.push(`restore: ${restoreResult.restored ? restoreResult.files.length + " files" : "none"}`);
 
-  // Always sync the latest token from R2 to config (config.json in R2 may have stale token)
-  if (refreshResult.access_token) {
-    const updated = await updateConfigTokens(sandbox, refreshResult.access_token);
-    if (updated) {
-      steps.push("config: tokens synced");
-      // Save updated config back to R2 so next restore has fresh token
-      await saveConfigToR2(sandbox, env);
-    }
-  } else if (refreshResult.refreshed) {
-    // Token was refreshed but we don't have it - shouldn't happen but log it
-    steps.push("config: refresh succeeded but no token returned");
+  // Always sync credentials from R2 into config.json. The config restored from
+  // R2 may carry a stale token, and on a fresh install it has no credentials at
+  // all - which is what made `cyrus self-add-repo` fail.
+  const syncResult = await syncConfigCredentials(sandbox, refreshResult.tokens);
+  if (syncResult.synced > 0) {
+    steps.push(`config: ${syncResult.synced} workspace credential(s) synced`);
+    // Save updated config back to R2 so the next restore starts from fresh state
+    await saveConfigToR2(sandbox, env);
+  } else {
+    steps.push("config: no workspace credentials to sync (authorize via /callback)");
   }
 
   // Create .env file
@@ -493,6 +593,11 @@ async function runBootstrap(
     `CYRUS_BASE_URL=${baseUrl}`,
     "CYRUS_SERVER_PORT=3456",
     "CYRUS_HOST_EXTERNAL=true",
+    // Cyrus >=0.2.68 validates webhook source IPs when CYRUS_HOST_EXTERNAL is set.
+    // Webhooks reach Cyrus from this Worker over localhost, so every one would be
+    // rejected as "unauthorized IP: 127.0.0.1". The Worker already verifies the
+    // Linear HMAC signature before forwarding, so the check is redundant here.
+    "WEBHOOK_IP_VALIDATION=false",
     "",
     "# Linear OAuth",
     `LINEAR_CLIENT_ID=${env.LINEAR_CLIENT_ID || ""}`,
@@ -506,9 +611,9 @@ async function runBootstrap(
     `GH_TOKEN=${ghToken}`,
     `GIT_USER_NAME=${gitName}`,
     `GIT_USER_EMAIL=${gitEmail}`,
-  ].join("\\n");
+  ].join("\n");
 
-  await sandbox.exec(`mkdir -p /root/.cyrus && printf '${envContent}' > /root/.cyrus/.env`);
+  await writeSandboxFile(sandbox, "/root/.cyrus/.env", `${envContent}\n`);
 
   // Configure git
   await sandbox.exec(`git config --global user.name "${gitName}" && git config --global user.email "${gitEmail}"`);
@@ -652,6 +757,17 @@ async function handleApiRoutes(
     });
   }
 
+  // Installed Cyrus CLI version. Read from the CLI, not Cyrus's HTTP /version,
+  // so it still reports when Cyrus is offline - which is exactly when a version
+  // drift needs to be visible.
+  if (url.pathname === "/api/version") {
+    const result = await sandbox.exec("cyrus --version 2>&1 | head -1");
+    return Response.json({
+      version: result.stdout.trim() || "unknown",
+      success: result.success,
+    });
+  }
+
   // Get config
   if (url.pathname === "/api/config") {
     const result = await sandbox.exec("cat /root/.cyrus/config.json 2>/dev/null || echo '{}'");
@@ -748,13 +864,14 @@ async function handleApiRoutes(
     }
   }
 
-  // Start Cyrus self-auth flow
-  if (url.pathname === "/api/auth" && request.method === "POST") {
-    const result = await sandbox.exec("cyrus self-auth 2>&1");
+  // List authorized Linear workspaces (for the Admin UI workspace picker)
+  if (url.pathname === "/api/workspaces") {
+    const tokens = await getAllOAuthTokensFromR2(env);
     return Response.json({
-      success: result.success,
-      output: result.stdout + result.stderr,
-      message: "Look for an authorization URL in the output. Open it in your browser to authorize Cyrus.",
+      workspaces: tokens.map((t) => ({
+        id: t.organization_id,
+        name: t.organization_name,
+      })),
     });
   }
 
@@ -769,13 +886,64 @@ async function handleApiRoutes(
       return Response.json({ success: false, error: "Missing 'url' parameter" }, { status: 400 });
     }
 
-    const cmd = workspace
-      ? `cyrus self-add-repo "${repoUrl}" "${workspace}"`
-      : `cyrus self-add-repo "${repoUrl}"`;
+    // Resolve the workspace here, never in the CLI. `cyrus self-add-repo`
+    // auto-selects only when exactly one workspace exists; with two or more and
+    // no name it falls through to readline.question() on stdin, and under
+    // sandbox.exec there is no TTY - so the command would hang until the exec
+    // times out instead of returning an error.
+    const tokens = await getAllOAuthTokensFromR2(env);
+    if (tokens.length === 0) {
+      return Response.json(
+        {
+          success: false,
+          error: "No authorized Linear workspaces. Complete OAuth at /callback first.",
+        },
+        { status: 400 }
+      );
+    }
 
+    const names = tokens.map((t) => t.organization_name).filter(Boolean);
+    let selected: string | undefined;
+
+    if (workspace) {
+      // Cyrus matches on workspace name, so validate against what it will see
+      selected = names.find((n) => n === workspace);
+      if (!selected) {
+        return Response.json(
+          {
+            success: false,
+            error: `Unknown workspace '${workspace}'. Authorized workspaces: ${names.join(", ")}`,
+          },
+          { status: 400 }
+        );
+      }
+    } else if (names.length === 1) {
+      selected = names[0];
+    } else {
+      return Response.json(
+        {
+          success: false,
+          error: "Multiple workspaces authorized - specify one",
+          workspaces: names,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Always pass the workspace positionally so the CLI never prompts.
+    // Closing stdin is a second guard against a prompt blocking the exec.
+    const cmd = `cyrus self-add-repo "${repoUrl}" "${selected}" < /dev/null`;
     const result = await sandbox.exec(cmd);
+
+    // self-add-repo mutates config.json; persist it so the next bootstrap's
+    // restore does not roll the new repository back.
+    if (result.success) {
+      await saveConfigToR2(sandbox, env);
+    }
+
     return Response.json({
       success: result.success,
+      workspace: selected,
       stdout: result.stdout,
       stderr: result.stderr,
     });
@@ -796,6 +964,8 @@ async function handleApiRoutes(
       `CYRUS_BASE_URL=${baseUrl}`,
       "CYRUS_SERVER_PORT=3456",
       "CYRUS_HOST_EXTERNAL=true",
+      // See runBootstrap(): required for Worker-forwarded webhooks on Cyrus >=0.2.68
+      "WEBHOOK_IP_VALIDATION=false",
       "",
       "# Linear OAuth",
       `LINEAR_CLIENT_ID=${env.LINEAR_CLIENT_ID || ""}`,
@@ -809,11 +979,14 @@ async function handleApiRoutes(
       `GH_TOKEN=${ghToken}`,
       `GIT_USER_NAME=${gitName}`,
       `GIT_USER_EMAIL=${gitEmail}`,
-    ].join("\\n");
+    ].join("\n");
 
-    const initScript = `mkdir -p /root/.cyrus && printf '${envContent}' > /root/.cyrus/.env && git config --global user.name "${gitName}" && git config --global user.email "${gitEmail}" && echo "init complete"`;
-
-    const result = await sandbox.exec(initScript);
+    // base64 the .env rather than interpolating secrets into a printf format
+    // string - a '%' or quote in a secret would otherwise corrupt the file.
+    await writeSandboxFile(sandbox, "/root/.cyrus/.env", `${envContent}\n`);
+    const result = await sandbox.exec(
+      `git config --global user.name "${gitName}" && git config --global user.email "${gitEmail}" && echo "init complete"`
+    );
     return Response.json({
       success: result.success,
       message: result.success ? "Cyrus environment initialized" : "Failed to initialize",
@@ -821,60 +994,57 @@ async function handleApiRoutes(
     });
   }
 
-  // Refresh OAuth token
+  // Refresh OAuth tokens (all workspaces) and push them into config.json
   if (url.pathname === "/api/refresh-token" && request.method === "POST") {
-    const result = await refreshOAuthTokenIfNeeded(env);
+    const result = await refreshOAuthTokensIfNeeded(env);
 
-    // If token was refreshed, also update the config in sandbox
-    if (result.refreshed && result.access_token) {
-      const updated = await updateConfigTokens(sandbox, result.access_token);
-      if (updated) {
-        await saveConfigToR2(sandbox, env);
-      }
-      return Response.json({
-        success: true,
-        message: "Token refreshed and config updated",
-        refreshed: true,
-      });
+    // Sync unconditionally: the config can hold a stale token even when no
+    // refresh was due (e.g. Cyrus rewrote config.json since the last sync).
+    const sync = await syncConfigCredentials(sandbox, result.tokens);
+    if (sync.synced > 0) {
+      await saveConfigToR2(sandbox, env);
     }
 
+    const messages: string[] = [];
+    if (result.refreshed.length > 0) messages.push(`refreshed: ${result.refreshed.join(", ")}`);
+    if (result.errors.length > 0) messages.push(result.errors.join("; "));
+    if (messages.length === 0) messages.push("tokens are still valid");
+    messages.push(`${sync.synced} workspace credential(s) in config`);
+
     return Response.json({
-      success: !result.error,
-      message: result.error || "Token is still valid",
-      refreshed: result.refreshed,
+      success: result.errors.length === 0,
+      message: messages.join("; "),
+      refreshed: result.refreshed.length > 0,
+      workspaces: result.tokens.length,
     });
   }
 
-  // Sync OAuth tokens from R2 to sandbox
+  // Sync OAuth credentials from R2 into config.json.
+  // Note: Cyrus reads credentials from config.linearWorkspaces only. An earlier
+  // version of this route wrote ~/.cyrus/tokens/<workspace>.json, which Cyrus
+  // never reads - that dead path is why credentials appeared "synced" while
+  // `cyrus self-add-repo` still reported none.
   if (url.pathname === "/api/sync-tokens" && request.method === "POST") {
     try {
-      // Get latest token from R2
-      const tokenObj = await env.CYRUS_STORAGE.get("tokens/latest.json");
-      if (!tokenObj) {
+      const tokens = await getAllOAuthTokensFromR2(env);
+      if (tokens.length === 0) {
         return Response.json({
           success: false,
           error: "No tokens found in R2. Complete OAuth first.",
         });
       }
 
-      const tokenData = await tokenObj.text();
-      const tokens = JSON.parse(tokenData);
-
-      // Write token to sandbox in Cyrus format
-      // Cyrus expects tokens in ~/.cyrus/tokens/<workspace>.json
-      const tokenPath = `/root/.cyrus/tokens/${tokens.organization_name || "default"}.json`;
-
-      // Use printf to write (avoid heredoc issues)
-      const escapedToken = tokenData.replace(/'/g, "'\\''");
-      const cmd = `mkdir -p /root/.cyrus/tokens && printf '${escapedToken}' > '${tokenPath}' && echo "Token synced to ${tokenPath}"`;
-
-      const result = await sandbox.exec(cmd);
+      const sync = await syncConfigCredentials(sandbox, tokens);
+      if (sync.synced > 0) {
+        await saveConfigToR2(sandbox, env);
+      }
 
       return Response.json({
-        success: result.success,
-        message: result.success ? `Tokens synced for ${tokens.organization_name}` : "Failed to sync",
-        stdout: result.stdout,
-        stderr: result.stderr,
+        success: sync.synced > 0,
+        message: sync.synced > 0
+          ? `Synced credentials for ${tokens.map((t) => t.organization_name).join(", ")}`
+          : "Failed to write credentials to config.json",
+        workspaces: sync.synced,
       });
     } catch (error) {
       return Response.json({
@@ -1196,7 +1366,9 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     <h3 style="font-size: 14px; margin-bottom: 12px;">Add Repository</h3>
     <div class="inline-form">
       <input type="text" id="repoUrl" placeholder="https://github.com/org/repo" />
-      <input type="text" id="repoWorkspace" placeholder="Workspace name (optional)" style="max-width: 200px;" />
+      <select id="repoWorkspace" style="max-width: 220px;">
+        <option value="">Loading workspaces...</option>
+      </select>
       <button onclick="addRepo()">Add</button>
     </div>
     <div id="addRepoStatus" style="margin-top: 8px; font-size: 13px;"></div>
@@ -1315,17 +1487,19 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     // Cyrus Status
     async function refreshCyrusStatus() {
       try {
-        const [configRes, statusRes] = await Promise.all([
+        const [configRes, statusRes, versionRes] = await Promise.all([
           fetch(apiBase('/api/config')),
           fetch(apiBase('/api/exec'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command: 'curl -s http://localhost:3456/status 2>/dev/null && curl -s http://localhost:3456/version 2>/dev/null || echo "offline"' })
-          })
+          }),
+          fetch(apiBase('/api/version'))
         ]);
 
         const config = await configRes.json();
         const statusData = await statusRes.json();
+        const versionData = await versionRes.json().catch(() => ({}));
 
         const repos = config.repositories || [];
         document.getElementById('statRepos').textContent = repos.length;
@@ -1354,7 +1528,10 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
         }
 
         document.getElementById('statStatus').textContent = cyrusStatus;
-        document.getElementById('statVersion').textContent = cyrusVersion;
+        // Prefer the running instance's reported version; fall back to the
+        // installed CLI so the tile is populated even when Cyrus is offline.
+        document.getElementById('statVersion').textContent =
+          cyrusVersion !== '-' ? cyrusVersion : (versionData.version || '-');
         document.getElementById('cyrusStatusBadge').innerHTML =
           cyrusStatus === 'offline' ? '<span class="status-badge error">Offline</span>' :
           cyrusStatus === 'idle' ? '<span class="status-badge ok">Ready</span>' :
@@ -1422,6 +1599,27 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     }
 
     // Repositories
+    // Populate the workspace picker from the workspaces actually authorized in
+    // R2. Cyrus matches on workspace name, so free-typing it was a silent
+    // failure mode.
+    async function loadWorkspaces() {
+      const select = document.getElementById('repoWorkspace');
+      try {
+        const res = await fetch(apiBase('/api/workspaces'));
+        const data = await res.json();
+        const workspaces = data.workspaces || [];
+        if (workspaces.length === 0) {
+          select.innerHTML = '<option value="">No workspaces authorized</option>';
+        } else {
+          select.innerHTML = workspaces.map(w =>
+            \`<option value="\${w.name}">\${w.name}</option>\`
+          ).join('');
+        }
+      } catch (e) {
+        select.innerHTML = '<option value="">Failed to load workspaces</option>';
+      }
+    }
+
     async function addRepo() {
       const url = document.getElementById('repoUrl').value.trim();
       const workspace = document.getElementById('repoWorkspace').value.trim();
@@ -1438,12 +1636,11 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
         if (data.success) {
           document.getElementById('addRepoStatus').innerHTML = '<span style="color: green;">Repository added!</span>';
           document.getElementById('repoUrl').value = '';
-          document.getElementById('repoWorkspace').value = '';
-          // Save to R2 after adding
-          await fetch(apiBase('/api/save'), { method: 'POST' });
+          // /api/add-repo already persisted config.json to R2
           setTimeout(refreshCyrusStatus, 1000);
         } else {
-          document.getElementById('addRepoStatus').innerHTML = '<span style="color: red;">Failed: ' + (data.stderr || data.error || 'Unknown error') + '</span>';
+          const detail = data.workspaces ? ' (' + data.workspaces.join(', ') + ')' : '';
+          document.getElementById('addRepoStatus').innerHTML = '<span style="color: red;">Failed: ' + (data.stderr || data.error || 'Unknown error') + detail + '</span>';
         }
       } catch (e) {
         document.getElementById('addRepoStatus').innerHTML = '<span style="color: red;">Error: ' + e.message + '</span>';
@@ -1528,6 +1725,7 @@ function handleAdminUI(url: URL, linearClientId: string): Response {
     refreshCyrusStatus();
     refreshContainer();
     refreshLogs();
+    loadWorkspaces();
     // Auto-refresh disabled by default to save compute
   </script>
 </body>
