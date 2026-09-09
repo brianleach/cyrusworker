@@ -24,7 +24,7 @@ RUN npm install -g @anthropic-ai/claude-code pnpm
 # /api/add-repo), so a floating install lets an upstream rename break this
 # Worker with no change here. Bump this pin explicitly and verify the
 # subcommands the Worker calls still exist.
-RUN npm install -g cyrus-ai@0.2.68 \
+RUN npm install -g cyrus-ai@0.2.71 \
     && cyrus --version
 
 # Create working directories
